@@ -37,7 +37,8 @@ class MomoService {
       const momoOrderId = `${Date.now()}_${order._id}`;
       const orderInfo = `Thanh toán đơn hàng #${order.orderCode}`;
       const redirectUrl = `${process.env.CLIENT_URL}/payment/result`;
-      const ipnUrl = `${process.env.API_URL || 'http://localhost:5000'}/callback/momo`;
+      const ipnUrl = `${process.env.API_URL}/callback/momo`;
+      console.log('IPN URL:', ipnUrl);
       const amount = Math.round(order.total);
 
       // Gửi thông tin đơn hàng trong extraData cho dễ tìm kiếm sau này

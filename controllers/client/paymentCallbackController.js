@@ -135,131 +135,95 @@ async function processPaymentCallback(orderCode, paymentMethod, transactionInfo)
  */
 exports.momoCallback = async (req, res, next) => {
   try {
-    console.log('Nhận callback từ MoMo (đầy đủ):', JSON.stringify(req.body, null, 2));
-    console.log('MOMO extraData:', req.body.extraData);
+    console.log('MoMo Callback đã nhận:', JSON.stringify(req.body, null, 2));
 
-    // Lấy cấu hình MoMo
-    const momoConfig = await PaymentMethod.findOne({ code: 'MOMO', isActive: true });
-    if (!momoConfig) {
-      console.error('Không tìm thấy cấu hình MoMo');
-      return res.status(200).json({ message: 'Không tìm thấy cấu hình MoMo nhưng đã xác nhận' });
-    }
+    // Trả về HTTP 200 ngay lập tức để MoMo không gửi lại callback
+    res.status(200).json({ message: 'Đã nhận callback' });
 
-    // Khởi tạo MomoService
-    const momoService = new MomoService(momoConfig.config);
-
-    // Kiểm tra resultCode trước khi gọi processCallback
-    const resultCode = req.body.resultCode;
-    if (resultCode !== '0' && resultCode !== 0) {
-      console.log(`Thanh toán MoMo không thành công, resultCode=${resultCode}`);
-      return res.status(200).json({
-        message: 'Thanh toán không thành công',
-        resultCode: resultCode
-      });
-    }
-
-    // Xử lý callback
-    const result = await momoService.processCallback(req.body);
-    console.log('Kết quả xử lý callback MoMo:', result);
-
-    if (result.success) {
-      // Tìm orderCode từ kết quả callback
-      let orderCode = result.orderCode || '';
-
-      // Nếu không có orderCode trực tiếp, thử lấy từ các thông tin khác
-      if (!orderCode) {
-        try {
-          // Lấy thông tin từ extraData - ƯU TIÊN VÌ CHỨA DỮ LIỆU CHÍNH XÁC NHẤT
-          if (req.body.extraData) {
-            console.log('Dữ liệu extraData trước khi giải mã:', req.body.extraData);
-            try {
-              const decodedData = JSON.parse(Buffer.from(req.body.extraData, 'base64').toString());
-              orderCode = decodedData.orderCode || '';
-              console.log('Giải mã extraData thành công:', decodedData);
-              console.log('Trích xuất mã đơn hàng:', orderCode);
-            } catch (decodeError) {
-              console.error('Lỗi giải mã extraData:', decodeError, 'dữ liệu gốc:', req.body.extraData);
-            }
+    // Tiếp tục xử lý ở background để tránh timeout
+    setTimeout(async () => {
+      try {
+        // Extract orderCode từ extraData (ưu tiên nhất)
+        let orderCode = '';
+        if (req.body.extraData) {
+          try {
+            const decodedData = JSON.parse(Buffer.from(req.body.extraData, 'base64').toString());
+            orderCode = decodedData.orderCode;
+            console.log('Trích xuất orderCode từ extraData:', orderCode);
+          } catch (error) {
+            console.error('Lỗi giải mã extraData:', error);
           }
-
-          // Hoặc thử lấy từ orderInfo
-          if (!orderCode && req.body.orderInfo) {
-            // Tìm mẫu DH + số trong orderInfo
-            const orderCodeMatch = req.body.orderInfo.match(/DH\d+/);
-            if (orderCodeMatch) {
-              orderCode = orderCodeMatch[0];
-              console.log('Tìm thấy mã đơn hàng trong orderInfo:', orderCode);
-            } else if (req.body.orderInfo.includes('#')) {
-              orderCode = req.body.orderInfo.split('#')[1].trim();
-              console.log('Tìm thấy mã đơn hàng sau dấu # trong orderInfo:', orderCode);
-            }
-          }
-
-          // Hoặc thử lấy từ orderId
-          if (!orderCode && req.body.orderId) {
-            const orderIdParts = req.body.orderId.split('_');
-            if (orderIdParts.length > 1) {
-              // Kiểm tra nếu phần cuối có dạng mã đơn hàng
-              const potentialOrderCode = orderIdParts[orderIdParts.length - 1];
-              if (potentialOrderCode.match(/^DH\d+$/)) {
-                orderCode = potentialOrderCode;
-                console.log('Tìm thấy mã đơn hàng từ orderId:', orderCode);
-              } else {
-                // Thử tìm objectId trong orderId
-                const orderId = orderIdParts[orderIdParts.length - 1];
-                console.log('Thử tìm đơn hàng với _id:', orderId);
-                try {
-                  // Nếu là ObjectId hợp lệ, thử tìm đơn hàng
-                  if (mongoose.Types.ObjectId.isValid(orderId)) {
-                    const orderById = await Order.findById(orderId);
-                    if (orderById) {
-                      orderCode = orderById.orderCode;
-                      console.log('Tìm thấy đơn hàng qua _id, mã đơn hàng:', orderCode);
-                    }
-                  }
-                } catch (findError) {
-                  console.error('Lỗi khi tìm đơn hàng theo _id:', findError);
-                }
-              }
-            }
-          }
-        } catch (e) {
-          console.error('Lỗi xử lý dữ liệu từ MoMo:', e);
         }
+
+        // Nếu không có orderCode từ extraData, thử từ các nguồn khác
+        if (!orderCode) {
+          if (req.body.orderInfo && req.body.orderInfo.includes('DH')) {
+            const match = req.body.orderInfo.match(/DH\d+/);
+            if (match) orderCode = match[0];
+          }
+        }
+
+        if (!orderCode) {
+          console.error('Không thể xác định mã đơn hàng từ callback MoMo');
+          return;
+        }
+
+        // Cập nhật đơn hàng trực tiếp, không dùng transaction
+        const order = await Order.findOne({ orderCode, paymentMethod: 'MOMO' });
+
+        if (!order) {
+          console.error(`Không tìm thấy đơn hàng với mã ${orderCode}`);
+          return;
+        }
+
+        if (order.payment.status === 'COMPLETED') {
+          console.log(`Đơn hàng ${orderCode} đã thanh toán trước đó`);
+          return;
+        }
+
+        // Cập nhật trạng thái đơn hàng
+        order.status = 'PROCESSING';
+        order.payment.status = 'COMPLETED';
+        order.payment.transactionId = req.body.transId;
+        order.payment.paidAt = new Date();
+
+        await order.save();
+        console.log(`Đã cập nhật trạng thái đơn hàng ${orderCode}`);
+
+        // Cập nhật tồn kho nếu chưa cập nhật
+        if (!order.stockUpdated) {
+          for (const item of order.items) {
+            if (!item.product) continue;
+
+            try {
+              await Product.findByIdAndUpdate(
+                item.product,
+                { $inc: { stock: -item.quantity, sold: item.quantity || 0 } }
+              );
+            } catch (err) {
+              console.error(`Lỗi cập nhật tồn kho sản phẩm ${item.product}:`, err);
+            }
+          }
+
+          order.stockUpdated = true;
+          await order.save();
+
+          if (order.user) {
+            await Cart.findOneAndUpdate(
+              { user: order.user },
+              { items: [], couponCode: null, couponDiscount: 0 }
+            );
+          }
+        }
+
+        console.log(`Hoàn tất xử lý callback cho đơn hàng ${orderCode}`);
+      } catch (error) {
+        console.error('Lỗi xử lý background MoMo callback:', error);
       }
+    }, 0);
 
-      console.log('Tìm đơn hàng với mã cuối cùng:', orderCode);
-      if (!orderCode) {
-        console.error('Không thể xác định mã đơn hàng từ callback MoMo');
-        return res.status(200).json({ message: 'Không thể xác định mã đơn hàng nhưng đã xác nhận' });
-      }
-
-      // Sử dụng hàm xử lý chung để cập nhật đơn hàng
-      const transactionInfo = {
-        momoResponse: req.body,
-        amount: result.amount || parseInt(req.body.amount),
-        transactionId: result.transactionId || req.body.transId
-      };
-
-      const processResult = await processPaymentCallback(orderCode, 'MOMO', transactionInfo);
-
-      if (processResult.wasAlreadyCompleted) {
-        return res.status(200).json({ message: 'Đơn hàng đã được thanh toán trước đó' });
-      }
-
-      if (processResult.success) {
-        return res.status(200).json({ message: 'Xử lý thanh toán thành công' });
-      } else {
-        // Nếu có lỗi xử lý nhưng resultCode là thành công, vẫn trả về 200 để MOMO không gửi lại
-        return res.status(200).json({ message: processResult.message || 'Lỗi xử lý đơn hàng nhưng đã xác nhận' });
-      }
-    } else {
-      // Xử lý thất bại
-      console.error('Thanh toán MoMo thất bại:', result.message);
-      return res.status(200).json({ message: 'Thanh toán thất bại nhưng đã xác nhận' });
-    }
   } catch (error) {
-    console.error('Lỗi xử lý callback từ MoMo (chi tiết):', error);
+    console.error('Lỗi xử lý callback MoMo:', error);
     // Luôn trả về 200 để MoMo không gửi lại
     return res.status(200).json({ message: 'Lỗi xử lý nhưng đã xác nhận' });
   }

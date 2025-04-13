@@ -8,10 +8,9 @@ const helmet = require('helmet');
 const mongoSanitize = require('express-mongo-sanitize');
 const path = require('path');
 const { errorConverter, errorHandler } = require('./utils/errorHandler');
-const { adminRouter, clientRouter, callbackRouter } = require('./routes');
+const { adminRouter, clientRouter } = require('./routes');
 const authDebug = require('./middlewares/authDebugMiddleware');
 const { initializeData } = require('./utils/seedData');
-const paymentCallbackController = require('./controllers/client/paymentCallbackController');
 
 // Tải biến môi trường
 dotenv.config({ path: './.env' });
@@ -76,8 +75,6 @@ if (process.env.NODE_ENV === 'development') {
   app.use('/admin', authDebug);
 }
 
-// Áp dụng các router - thứ tự rất quan trọng
-app.use('/callback', callbackRouter);
 app.use('/admin', adminRouter);
 app.use('/', clientRouter);
 

@@ -43,13 +43,9 @@ clientRouter.use('/orders', clientOrderRoutes);
 clientRouter.use('/cart', clientCartRoutes);
 clientRouter.use('/checkout', clientCheckoutRoutes);
 clientRouter.use('/payment', clientPaymentRoutes);
-
-
-const callbackRouter = express.Router();
-callbackRouter.use('/callback', clientCallbackRoutes);
+clientRouter.use('/callback', clientCallbackRoutes);
 
 module.exports = {
   adminRouter,
-  clientRouter,
-  callbackRouter
+  clientRouter
 };
