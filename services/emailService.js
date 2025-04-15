@@ -56,7 +56,7 @@ const emailService = {
    */
   async sendVerificationEmail(customer, verificationToken) {
     // Thay đổi để trỏ trực tiếp đến backend endpoint
-    const verificationUrl = `http://localhost:5000/auth/verify-email/${verificationToken}`;
+    const verificationUrl = `${process.env.API_URL}/${verificationToken}`;
 
     await this.sendEmail({
       to: customer.email,
