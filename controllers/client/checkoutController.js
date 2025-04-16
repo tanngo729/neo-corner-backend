@@ -219,7 +219,7 @@ exports.processCheckout = async (req, res, next) => {
     await session.commitTransaction();
     session.endSession();
 
-    // ------------------- THÊM MỚI: Code gửi thông báo đơn hàng -------------------
+    // ------------------- THÊM MỚI: Code gửi thông báo đơn hàng (CẬP NHẬT) -------------------
     try {
       // TẠO DỮ LIỆU THÔNG BÁO CHUẨN HÓA
       const notificationData = {
@@ -252,17 +252,20 @@ exports.processCheckout = async (req, res, next) => {
       await notification.save();
       console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã lưu thông báo vào database: ${notification._id}`);
 
-      // THÔNG BÁO QUA SOCKET
-      await socketManager.notifyNewOrder(notificationData);
+      // CHỈ SỬ DỤNG MỘT PHƯƠNG THỨC GỬI THÔNG BÁO DUY NHẤT
+      await socketManager.notifyNewOrder({
+        ...notificationData,
+        notificationId: notification._id.toString()
+      });
 
-      // GỬI THÔNG BÁO BROADCAST KHẨN CẤP (để đảm bảo có thông báo)
-      if (socketManager.getIO()) {
-        socketManager.getIO().emit('new-order', {
-          ...notificationData,
-          urgent: true
-        });
-        console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã gửi broadcast thông báo khẩn cấp cho đơn hàng #${order.orderCode}`);
-      }
+      // KHÔNG SỬ DỤNG EMIT TRỰC TIẾP NỮA ĐỂ TRÁNH THÔNG BÁO KÉP
+      // if (socketManager.getIO()) {
+      //   socketManager.getIO().emit('new-order', {
+      //     ...notificationData,
+      //     urgent: true
+      //   });
+      //   console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã gửi broadcast thông báo khẩn cấp cho đơn hàng #${order.orderCode}`);
+      // }
     } catch (notifyError) {
       console.error('Lỗi khi gửi thông báo đơn hàng:', notifyError);
       // Vẫn tiếp tục xử lý, không ảnh hưởng đến việc tạo đơn hàng

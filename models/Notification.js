@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const notificationSchema = new mongoose.Schema({
   type: {
     type: String,
-    enum: ['new-order', 'order-status-update', 'cancelled-by-user', 'system'],
+    enum: ['new-order', 'order-status-update', 'cancelled-by-user', 'system', 'grouped'],
     required: true
   },
   orderId: {
@@ -32,6 +32,11 @@ const notificationSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Customer' // Tham chiếu đến Customer nếu là thông báo cho khách hàng
   },
+  // Thêm metadata để lưu thông tin về thông báo gom nhóm
+  metadata: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -44,5 +49,6 @@ notificationSchema.index({ forAdmin: 1, read: 1, createdAt: -1 });
 notificationSchema.index({ userId: 1, read: 1, createdAt: -1 });
 notificationSchema.index({ customerId: 1, read: 1, createdAt: -1 });
 notificationSchema.index({ orderId: 1 });
+notificationSchema.index({ type: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Notification', notificationSchema);

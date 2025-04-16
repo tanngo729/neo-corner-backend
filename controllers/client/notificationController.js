@@ -1,6 +1,8 @@
+// controllers/client/notificationController.js
 const Notification = require('../../models/Notification');
 const { ApiError } = require('../../utils/errorHandler');
 const ApiResponse = require('../../utils/apiResponder');
+const socketManager = require('../../utils/socketManager');
 
 // Lấy thông báo của khách hàng
 exports.getNotifications = async (req, res, next) => {
@@ -56,6 +58,11 @@ exports.markAsRead = async (req, res, next) => {
       { read: true }
     );
 
+    // Đồng bộ trạng thái đã đọc
+    notificationIds.forEach(notificationId => {
+      socketManager.markNotificationRead(notificationId, customerId, false);
+    });
+
     return ApiResponse.success(res, 200, {
       modifiedCount: result.modifiedCount
     }, 'Đánh dấu thông báo đã đọc thành công');
@@ -77,6 +84,15 @@ exports.markAllAsRead = async (req, res, next) => {
       },
       { read: true }
     );
+
+    // Gửi thông báo về đã đọc tất cả
+    if (socketManager.getIO()) {
+      socketManager.getIO().to(`customer:${customerId}`).emit('all-notifications-marked-read', {
+        success: true,
+        count: result.modifiedCount,
+        timestamp: new Date().toISOString()
+      });
+    }
 
     return ApiResponse.success(res, 200, {
       modifiedCount: result.modifiedCount
@@ -103,6 +119,14 @@ exports.deleteNotification = async (req, res, next) => {
     }
 
     await notification.deleteOne();
+
+    // Gửi thông báo xóa về client
+    if (socketManager.getIO()) {
+      socketManager.getIO().to(`customer:${customerId}`).emit('notification-deleted', {
+        id: notificationId,
+        timestamp: new Date().toISOString()
+      });
+    }
 
     return ApiResponse.success(res, 200, null, 'Xóa thông báo thành công');
   } catch (error) {

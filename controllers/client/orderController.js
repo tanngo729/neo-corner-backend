@@ -109,6 +109,7 @@ exports.createOrder = async (req, res, next) => {
       await order.save();
     }
 
+    // Phần gửi thông báo đã được cập nhật
     try {
       // TẠO DỮ LIỆU THÔNG BÁO CHUẨN HÓA
       const notificationData = {
@@ -127,7 +128,7 @@ exports.createOrder = async (req, res, next) => {
 
       console.log(`[THÔNG BÁO ĐƠN HÀNG] Đơn hàng mới #${order.orderCode} - Đang gửi thông báo qua socket`);
 
-      // LƯU THÔNG BÁO VÀO DATABASE TỪ controller
+      // LƯU THÔNG BÁO VÀO DATABASE
       const notification = new Notification({
         type: 'new-order',
         orderId: order._id,
@@ -142,18 +143,21 @@ exports.createOrder = async (req, res, next) => {
       await notification.save();
       console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã lưu thông báo vào database: ${notification._id}`);
 
-      // THÔNG BÁO QUA SOCKET
-      await socketManager.notifyNewOrder(notificationData);
+      // CHỈ GỬI MỘT THÔNG BÁO DUY NHẤT QUA SOCKET
+      await socketManager.notifyNewOrder({
+        ...notificationData,
+        notificationId: notification._id.toString()
+      });
 
-      // GỬI THÔNG BÁO BROADCAST KHẨN CẤP (để đảm bảo có thông báo)
-      if (socketManager.getIO()) {
-        socketManager.getIO().emit('new-order', {
-          ...notificationData,
-          urgent: true
-        });
-
-        console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã gửi broadcast thông báo khẩn cấp cho đơn hàng #${order.orderCode}`);
-      }
+      // XÓA HOẶC COMMENT ĐOẠN CODE NÀY
+      // // GỬI THÔNG BÁO BROADCAST KHẨN CẤP (để đảm bảo có thông báo)
+      // if (socketManager.getIO()) {
+      //   socketManager.getIO().emit('new-order', {
+      //     ...notificationData,
+      //     urgent: true
+      //   });
+      //   console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã gửi broadcast thông báo khẩn cấp cho đơn hàng #${order.orderCode}`);
+      // }
     } catch (notifyError) {
       console.error('Lỗi khi gửi thông báo đơn hàng:', notifyError);
       // Vẫn tiếp tục xử lý, không ảnh hưởng đến việc tạo đơn hàng
@@ -283,7 +287,8 @@ exports.cancelOrder = async (req, res, next) => {
         reason: order.cancelReason,
         previousStatus: oldStatus,
         customerName: order.shippingAddress.fullName,
-        timestamp: new Date()
+        timestamp: new Date(),
+        notificationId: notification._id.toString()
       });
 
       console.log(`[${new Date().toISOString()}] Order cancellation notification sent: ${order.orderCode}`);

@@ -74,12 +74,15 @@ userSchema.methods.matchPassword = async function (enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
 };
 
-// Phương thức tạo JWT token
+// Phương thức tạo JWT token - ĐÃ CẬP NHẬT
 userSchema.methods.generateAuthToken = function () {
+  // Đối với admin, token có thời hạn dài hơn (30 ngày)
+  const expiresIn = this.type === 'admin' ? '30d' : process.env.JWT_ACCESS_EXPIRATION_MINUTES + 'm';
+
   return jwt.sign(
     { id: this._id, type: this.type },
     process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_ACCESS_EXPIRATION_MINUTES + 'm' }
+    { expiresIn }
   );
 };
 
