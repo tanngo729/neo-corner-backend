@@ -1,4 +1,4 @@
-// backend/server.js
+// server.js
 const dotenv = require('dotenv');
 const express = require('express');
 const mongoose = require('mongoose');
@@ -7,6 +7,8 @@ const morgan = require('morgan');
 const helmet = require('helmet');
 const mongoSanitize = require('express-mongo-sanitize');
 const path = require('path');
+const http = require('http');
+const socketIO = require('socket.io');
 const { errorConverter, errorHandler } = require('./utils/errorHandler');
 const { adminRouter, clientRouter } = require('./routes');
 const authDebug = require('./middlewares/authDebugMiddleware');
@@ -28,8 +30,6 @@ console.log('CLIENT URL:', process.env.CLIENT_URL);
 mongoose.connect(process.env.MONGODB_URI)
   .then(async () => {
     console.log('MongoDB đã kết nối thành công...');
-
-    // Khởi tạo dữ liệu sau khi kết nối thành công (chỉ trong môi trường development)
     if (process.env.NODE_ENV === 'development') {
       await initializeData();
     }
@@ -38,6 +38,33 @@ mongoose.connect(process.env.MONGODB_URI)
 
 // Khởi tạo ứng dụng Express
 const app = express();
+
+// Tạo HTTP server từ Express app
+const server = http.createServer(app);
+
+// Khởi tạo Socket.IO với cấu hình CORS và debug log
+const io = socketIO(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    credentials: true,
+    allowedHeaders: ["my-custom-header"],
+    transports: ['websocket', 'polling']
+  },
+  allowEIO3: true
+});
+
+// Thêm debug log cho socket
+io.on('connection', (socket) => {
+  console.log(`[SOCKET DEBUG] Client kết nối mới: ${socket.id}`);
+
+  socket.on('disconnect', (reason) => {
+    console.log(`[SOCKET DEBUG] Client ngắt kết nối: ${socket.id}, lý do: ${reason}`);
+  });
+});
+
+// Khởi tạo socketManager và giao tiếp thông qua các sự kiện socket
+require('./utils/socketManager').initialize(io);
 
 // Cấu hình middleware
 app.use(cors());
@@ -49,13 +76,13 @@ app.use(helmet({
 }));
 app.use(mongoSanitize());
 
-// Thêm middleware ghi log tất cả request
+// Middleware log request
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} - IP: ${req.ip}`);
   next();
 });
 
-// Thêm middleware log chi tiết cho /callback routes
+// Middleware log chi tiết cho /callback routes
 app.use('/callback', (req, res, next) => {
   console.log('===== CALLBACK ROUTE =====');
   console.log('Method:', req.method);
@@ -70,7 +97,7 @@ app.use('/callback', (req, res, next) => {
   next();
 });
 
-// Debug middleware cho admin trong môi trường phát triển
+// Debug middleware cho admin (chỉ dùng cho development)
 if (process.env.NODE_ENV === 'development') {
   app.use('/admin', authDebug);
 }
@@ -89,10 +116,9 @@ app.get('/ping', (req, res) => {
   });
 });
 
-// Phục vụ nội dung tĩnh nếu cần
+// Phục vụ nội dung tĩnh khi chạy production
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, 'public')));
-
   app.get('*', (req, res) => {
     res.sendFile(path.resolve(__dirname, 'public', 'index.html'));
   });
@@ -113,7 +139,7 @@ app.use('*', (req, res) => {
 
 // Khởi động server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log('======================================');
   console.log(`Server đang chạy trên cổng ${PORT}`);
   console.log(`Môi trường: ${process.env.NODE_ENV}`);
@@ -122,13 +148,11 @@ app.listen(PORT, () => {
   console.log('======================================');
 });
 
-// Xử lý sự kiện không xử lý được
+// Xử lý các ngoại lệ không được bắt
 process.on('unhandledRejection', (err) => {
   console.log('UNHANDLED REJECTION! Đang tắt...');
   console.log(err.name, err.message);
   console.log(err.stack);
-
-  // Thoát quá trình một cách an toàn
   process.exit(1);
 });
 

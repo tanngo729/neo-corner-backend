@@ -9,13 +9,16 @@ const ApiResponse = require('../../utils/apiResponder');
 const shippingService = require('../../services/shippingService');
 const mongoose = require('mongoose');
 
+// THÊM IMPORT CHO THÔNG BÁO
+const Notification = require('../../models/Notification');
+const socketManager = require('../../utils/socketManager');
+
 // Lấy phương thức vận chuyển khả dụng
 exports.getShippingMethods = async (req, res, next) => {
   try {
     const shippingMethods = await ShippingMethod.find({ isActive: true })
       .select('code name description baseFee freeShippingThreshold estimatedDeliveryDays')
       .sort({ position: 1 });
-
     return ApiResponse.success(res, 200, shippingMethods, 'Lấy danh sách phương thức vận chuyển thành công');
   } catch (error) {
     next(error);
@@ -28,7 +31,6 @@ exports.getPaymentMethods = async (req, res, next) => {
     const paymentMethods = await PaymentMethod.find({ isActive: true })
       .select('code name description icon position')
       .sort({ position: 1 });
-
     return ApiResponse.success(res, 200, paymentMethods, 'Lấy danh sách phương thức thanh toán thành công');
   } catch (error) {
     next(error);
@@ -39,39 +41,31 @@ exports.getPaymentMethods = async (req, res, next) => {
 exports.calculateShippingFee = async (req, res, next) => {
   try {
     const { shippingMethodCode, regionCode } = req.body;
-
     if (!shippingMethodCode) {
       throw new ApiError(400, 'Vui lòng chọn phương thức vận chuyển');
     }
-
     const cart = await Cart.findOne({ user: req.user.id })
       .populate({
         path: 'items.product',
         select: 'name price stock mainImage status'
       });
-
     if (!cart || !cart.items || cart.items.length === 0) {
       throw new ApiError(400, 'Giỏ hàng trống');
     }
-
     const orderTotal = cart.subtotal;
-
     let finalRegionCode = regionCode;
     if (!finalRegionCode && req.body.city) {
       finalRegionCode = shippingService.getRegionCodeFromCity(req.body.city);
     }
-
     const shippingFee = await shippingService.calculateShippingFee(
       shippingMethodCode,
       finalRegionCode,
       orderTotal
     );
-
     const deliveryEstimate = await shippingService.estimateDeliveryTime(
       shippingMethodCode,
       finalRegionCode
     );
-
     return ApiResponse.success(res, 200, {
       shippingFee,
       deliveryEstimate
@@ -140,12 +134,10 @@ exports.processCheckout = async (req, res, next) => {
         outOfStockItems.push(item.name || 'Sản phẩm không xác định');
         continue;
       }
-
       if (item.quantity > item.product.stock) {
         outOfStockItems.push(item.product.name || 'Sản phẩm không xác định');
       }
     }
-
     if (outOfStockItems.length > 0) {
       throw new ApiError(400, `Sản phẩm ${outOfStockItems.join(', ')} đã hết hàng hoặc không khả dụng`);
     }
@@ -179,8 +171,6 @@ exports.processCheckout = async (req, res, next) => {
     // Xác định trạng thái đơn hàng và thanh toán ban đầu
     let initialOrderStatus = 'PENDING';
     let paymentStatus = 'PENDING';
-
-    // Nếu là phương thức thanh toán online, chuyển trạng thái thành "đang chờ thanh toán"
     if (paymentMethod === 'MOMO' || paymentMethod === 'VNPAY') {
       initialOrderStatus = 'AWAITING_PAYMENT';
       paymentStatus = 'AWAITING';
@@ -200,9 +190,7 @@ exports.processCheckout = async (req, res, next) => {
       paymentMethod,
       paymentMethodId: paymentMethodData._id,
       status: initialOrderStatus,
-      payment: {
-        status: paymentStatus
-      },
+      payment: { status: paymentStatus },
       notes,
       stockUpdated: false
     });
@@ -218,20 +206,68 @@ exports.processCheckout = async (req, res, next) => {
           { session }
         )
       );
-
       await Promise.all(productUpdatePromises);
       order.stockUpdated = true;
       await order.save({ session });
-
       cart.items = [];
       cart.couponCode = null;
       cart.couponDiscount = 0;
       await cart.save({ session });
     }
 
-    // Commit transaction
+    // Commit transaction & end session
     await session.commitTransaction();
     session.endSession();
+
+    // ------------------- THÊM MỚI: Code gửi thông báo đơn hàng -------------------
+    try {
+      // TẠO DỮ LIỆU THÔNG BÁO CHUẨN HÓA
+      const notificationData = {
+        _id: order._id.toString(),
+        orderId: order._id.toString(),
+        orderCode: order.orderCode,
+        total: order.total,
+        status: order.status,
+        type: 'new-order',
+        timestamp: new Date(),
+        // Thêm các thông tin chi tiết khác
+        customerName: shippingAddress.fullName,
+        customerPhone: shippingAddress.phone,
+        paymentMethod: paymentMethod
+      };
+
+      console.log(`[THÔNG BÁO ĐƠN HÀNG] Đơn hàng mới #${order.orderCode} - Đang gửi thông báo qua socket`);
+
+      // LƯU THÔNG BÁO VÀO DATABASE
+      const notification = new Notification({
+        type: 'new-order',
+        orderId: order._id,
+        orderCode: order.orderCode,
+        title: `Đơn hàng mới #${order.orderCode}`,
+        description: `Đơn hàng từ ${shippingAddress.fullName} - ${order.total.toLocaleString()} VND`,
+        status: order.status,
+        forAdmin: true,
+        read: false
+      });
+      await notification.save();
+      console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã lưu thông báo vào database: ${notification._id}`);
+
+      // THÔNG BÁO QUA SOCKET
+      await socketManager.notifyNewOrder(notificationData);
+
+      // GỬI THÔNG BÁO BROADCAST KHẨN CẤP (để đảm bảo có thông báo)
+      if (socketManager.getIO()) {
+        socketManager.getIO().emit('new-order', {
+          ...notificationData,
+          urgent: true
+        });
+        console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã gửi broadcast thông báo khẩn cấp cho đơn hàng #${order.orderCode}`);
+      }
+    } catch (notifyError) {
+      console.error('Lỗi khi gửi thông báo đơn hàng:', notifyError);
+      // Vẫn tiếp tục xử lý, không ảnh hưởng đến việc tạo đơn hàng
+    }
+    // ------------------- KẾT THÚC PHẦN THÔNG BÁO -------------------
 
     return ApiResponse.success(res, 201, {
       order: {
@@ -260,19 +296,15 @@ exports.getCheckoutInfo = async (req, res, next) => {
         path: 'items.product',
         select: 'name price stock mainImage status'
       });
-
     if (!cart || !cart.items || cart.items.length === 0) {
       throw new ApiError(400, 'Giỏ hàng trống');
     }
-
     let hasStockIssue = false;
     const cartItems = cart.items.map(item => {
       const stockIssue = !item.product ||
         item.product.status !== 'active' ||
         item.quantity > item.product.stock;
-
       if (stockIssue) hasStockIssue = true;
-
       return {
         _id: item._id,
         productId: item.product ? item.product._id : null,
@@ -283,15 +315,12 @@ exports.getCheckoutInfo = async (req, res, next) => {
         stockIssue: stockIssue
       };
     });
-
     const shippingMethods = await ShippingMethod.find({ isActive: true })
       .select('code name description baseFee freeShippingThreshold estimatedDeliveryDays')
       .sort({ position: 1 });
-
     const paymentMethods = await PaymentMethod.find({ isActive: true })
       .select('code name description icon position')
       .sort({ position: 1 });
-
     const checkoutInfo = {
       cart: {
         items: cartItems,
@@ -305,7 +334,6 @@ exports.getCheckoutInfo = async (req, res, next) => {
       paymentMethods,
       hasStockIssue
     };
-
     return ApiResponse.success(res, 200, checkoutInfo, 'Lấy thông tin checkout thành công');
   } catch (error) {
     next(error);

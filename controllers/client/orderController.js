@@ -1,10 +1,12 @@
-// backend/controllers/client/orderController.js
+// backend/controllers/client/orderController.js - Enhanced version
 const Order = require('../../models/Order');
 const Product = require('../../models/Product');
+const Notification = require('../../models/Notification');
 const { ApiError } = require('../../utils/errorHandler');
 const ApiResponse = require('../../utils/apiResponder');
+const socketManager = require('../../utils/socketManager');
 
-// Tạo đơn hàng mới
+// Create new order - IMPROVED
 exports.createOrder = async (req, res, next) => {
   try {
     const {
@@ -107,13 +109,63 @@ exports.createOrder = async (req, res, next) => {
       await order.save();
     }
 
+    try {
+      // TẠO DỮ LIỆU THÔNG BÁO CHUẨN HÓA
+      const notificationData = {
+        _id: order._id.toString(),
+        orderId: order._id.toString(),
+        orderCode: order.orderCode,
+        total: order.total,
+        status: order.status,
+        type: 'new-order',
+        timestamp: new Date(),
+        // Thêm các thông tin chi tiết khác
+        customerName: shippingInfo.fullName,
+        customerPhone: shippingInfo.phone,
+        paymentMethod: paymentMethod
+      };
+
+      console.log(`[THÔNG BÁO ĐƠN HÀNG] Đơn hàng mới #${order.orderCode} - Đang gửi thông báo qua socket`);
+
+      // LƯU THÔNG BÁO VÀO DATABASE TỪ controller
+      const notification = new Notification({
+        type: 'new-order',
+        orderId: order._id,
+        orderCode: order.orderCode,
+        title: `Đơn hàng mới #${order.orderCode}`,
+        description: `Đơn hàng từ ${shippingInfo.fullName} - ${order.total.toLocaleString()} VND`,
+        status: order.status,
+        forAdmin: true,
+        read: false
+      });
+
+      await notification.save();
+      console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã lưu thông báo vào database: ${notification._id}`);
+
+      // THÔNG BÁO QUA SOCKET
+      await socketManager.notifyNewOrder(notificationData);
+
+      // GỬI THÔNG BÁO BROADCAST KHẨN CẤP (để đảm bảo có thông báo)
+      if (socketManager.getIO()) {
+        socketManager.getIO().emit('new-order', {
+          ...notificationData,
+          urgent: true
+        });
+
+        console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã gửi broadcast thông báo khẩn cấp cho đơn hàng #${order.orderCode}`);
+      }
+    } catch (notifyError) {
+      console.error('Lỗi khi gửi thông báo đơn hàng:', notifyError);
+      // Vẫn tiếp tục xử lý, không ảnh hưởng đến việc tạo đơn hàng
+    }
+
     return ApiResponse.success(res, 201, order, 'Đặt hàng thành công');
   } catch (error) {
     next(error);
   }
 };
 
-// Lấy danh sách đơn hàng của người dùng
+// Get user's orders
 exports.getMyOrders = async (req, res, next) => {
   try {
     const { page = 1, limit = 10, status } = req.query;
@@ -144,7 +196,7 @@ exports.getMyOrders = async (req, res, next) => {
   }
 };
 
-// Lấy chi tiết đơn hàng
+// Get order details
 exports.getOrderDetail = async (req, res, next) => {
   try {
     const order = await Order.findOne({
@@ -162,7 +214,7 @@ exports.getOrderDetail = async (req, res, next) => {
   }
 };
 
-// Hủy đơn hàng
+// Cancel order - IMPROVED
 exports.cancelOrder = async (req, res, next) => {
   try {
     const order = await Order.findOne({
@@ -174,17 +226,25 @@ exports.cancelOrder = async (req, res, next) => {
       throw new ApiError(404, 'Không tìm thấy đơn hàng');
     }
 
-    if (order.status !== 'PENDING' && order.status !== 'PROCESSING' && order.status !== 'AWAITING_PAYMENT') {
+    // Constraint: can only cancel orders with status PENDING, AWAITING_PAYMENT, or PROCESSING
+    const cancelableStatuses = ['PENDING', 'AWAITING_PAYMENT', 'PROCESSING'];
+    if (!cancelableStatuses.includes(order.status)) {
       throw new ApiError(400, 'Không thể hủy đơn hàng ở trạng thái hiện tại');
     }
 
+    // If order is already in SHIPPING or later status, don't allow cancellation
+    if (['SHIPPING', 'DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'].includes(order.status)) {
+      throw new ApiError(400, 'Không thể hủy đơn hàng đã vận chuyển, đã giao hoặc đã hoàn thành');
+    }
+
+    const oldStatus = order.status; // Save old status for notification
     order.status = 'CANCELLED';
     order.cancelReason = req.body.reason || 'Người dùng hủy đơn';
     order.cancelledAt = Date.now();
 
     await order.save();
 
-    // Chỉ hoàn lại tồn kho nếu đã cập nhật trước đó
+    // Only restore inventory if previously updated
     if (order.stockUpdated) {
       for (const item of order.items) {
         await Product.findByIdAndUpdate(item.product, {
@@ -193,13 +253,51 @@ exports.cancelOrder = async (req, res, next) => {
       }
     }
 
+    // Notify customer of order status update
+    socketManager.notifyOrderStatusUpdate(order);
+
+    // IMPROVED: Create detailed notification for admin about cancelled order
+    try {
+      // Create database notification
+      const notification = new Notification({
+        type: 'cancelled-by-user',
+        orderId: order._id,
+        orderCode: order.orderCode,
+        title: `Đơn hàng bị hủy #${order.orderCode}`,
+        description: `${order.cancelReason} - ${order.total.toLocaleString()} VND`,
+        status: 'CANCELLED',
+        forAdmin: true,
+        read: false
+      });
+
+      await notification.save();
+
+      // Notify admin through socket
+      socketManager.notifyNewOrder({
+        _id: order._id.toString(),
+        orderId: order._id.toString(),
+        orderCode: order.orderCode,
+        total: order.total,
+        status: 'CANCELLED',
+        type: 'cancelled-by-user',
+        reason: order.cancelReason,
+        previousStatus: oldStatus,
+        customerName: order.shippingAddress.fullName,
+        timestamp: new Date()
+      });
+
+      console.log(`[${new Date().toISOString()}] Order cancellation notification sent: ${order.orderCode}`);
+    } catch (notificationError) {
+      console.error(`[${new Date().toISOString()}] Error sending cancellation notification:`, notificationError);
+    }
+
     return ApiResponse.success(res, 200, order, 'Hủy đơn hàng thành công');
   } catch (error) {
     next(error);
   }
 };
 
-// Kiểm tra đơn hàng bằng số đơn hàng (cho khách hàng không đăng nhập)
+// Check order by number (for guests)
 exports.checkOrderByNumber = async (req, res, next) => {
   try {
     const { orderCode, phone } = req.body;
@@ -223,7 +321,7 @@ exports.checkOrderByNumber = async (req, res, next) => {
   }
 };
 
-// Hàm tạo mã đơn hàng
+// Function to generate order code
 const generateOrderCode = () => {
   const date = new Date();
   const year = date.getFullYear().toString().substr(-2);

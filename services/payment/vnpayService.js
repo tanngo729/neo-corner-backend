@@ -6,21 +6,22 @@ const { ApiError } = require('../../utils/errorHandler');
 
 class VnpayService {
   constructor(config) {
-    // Ưu tiên sử dụng trực tiếp biến môi trường nếu có
     this.tmnCode = config.vnpTmnCode || process.env.VNPAY_TMN_CODE;
     this.hashSecret = config.vnpHashSecret || process.env.VNPAY_HASH_SECRET;
     this.vnpUrl = config.vnpUrl || process.env.VNPAY_URL || 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html';
-    this.returnUrl = process.env.VNPAY_RETURN_URL || 'http://localhost:5000/callback/vnpay';
+    this.returnUrl = process.env.VNPAY_RETURN_URL;
     this.isTestMode = config.vnpTestMode !== false;
 
-    // Thông tin debug
-    console.log('Khởi tạo VNPAY Service với các biến môi trường:');
-    console.log('- API_URL:', process.env.API_URL);
-    console.log('- VNPAY_RETURN_URL:', process.env.VNPAY_RETURN_URL);
-    console.log('- VNPAY_TMN_CODE:', process.env.VNPAY_TMN_CODE);
-    console.log('- VNPAY_URL:', process.env.VNPAY_URL);
+    // Log cấu hình để debug
+    console.log('VNPay Service khởi tạo với cấu hình:', {
+      tmnCode: this.tmnCode,
+      returnUrl: this.returnUrl,
+      vnpUrl: this.vnpUrl,
+      hashSecretLength: this.hashSecret ? this.hashSecret.length : 0,
+      testMode: this.isTestMode
+    });
 
-    // Sử dụng các giá trị mặc định cho môi trường test nếu không có config
+    // Sử dụng giá trị mặc định cho môi trường test nếu không có config
     if (this.isTestMode) {
       this.tmnCode = this.tmnCode || 'CQSRDGBD';
       this.hashSecret = this.hashSecret || '5HAYN4OAK3A02GYULICV3GOSROG8Z41B';
@@ -28,28 +29,17 @@ class VnpayService {
 
     // Kiểm tra các thông số bắt buộc
     if (!this.tmnCode || !this.hashSecret) {
-      console.warn('Cấu hình VNPAY không đầy đủ. Vui lòng kiểm tra lại thông tin cấu hình.');
+      console.warn('Cấu hình VNPAY không đầy đủ. Vui lòng kiểm tra lại thông tin.');
     }
-
-    console.log('VNPAY Service initialized with:', {
-      tmnCode: this.tmnCode,
-      url: this.vnpUrl,
-      returnUrl: this.returnUrl,
-      testMode: this.isTestMode
-    });
   }
 
-  /**
-   * Sắp xếp object theo key
-   * @param {Object} obj - Object cần sắp xếp
-   * @returns {Object} Object đã sắp xếp
-   */
+  // Sắp xếp object theo thứ tự key từ a-z
   sortObject(obj) {
     const sorted = {};
     const keys = Object.keys(obj).sort();
 
     for (const key of keys) {
-      if (obj[key] !== null && obj[key] !== undefined) {
+      if (obj[key] !== null && obj[key] !== undefined && obj[key] !== '') {
         sorted[key] = obj[key];
       }
     }
@@ -57,117 +47,103 @@ class VnpayService {
     return sorted;
   }
 
-  /**
-   * Tạo URL thanh toán VNPAY
-   * @param {Object} order - Thông tin đơn hàng
-   * @param {string} ipAddr - Địa chỉ IP của khách hàng
-   * @returns {Promise<string>} URL thanh toán
-   */
+  // Tạo URL thanh toán VNPay
   async createPaymentUrl(order, ipAddr = '127.0.0.1') {
     try {
-      console.log('Tạo URL thanh toán VNPAY cho đơn hàng:', order);
+      console.log('Tạo URL thanh toán VNPay cho đơn hàng:', JSON.stringify(order));
+
+      // Kiểm tra dữ liệu đầu vào
+      if (!order || !order.orderCode || !order.total) {
+        throw new Error('Dữ liệu đơn hàng không hợp lệ');
+      }
 
       // Đảm bảo orderCode hợp lệ - chỉ giữ chữ và số
       const sanitizedOrderCode = order.orderCode.replace(/[^a-zA-Z0-9]/g, '');
 
-      // Format số tiền, nhân với 100 theo yêu cầu của VNPAY
+      // Format số tiền, nhân với 100 theo yêu cầu của VNPay
       const amount = Math.round(order.total) * 100;
 
-      // Các tham số VNPAY
-      const date = new Date();
-      const createDate = moment(date).format('YYYYMMDDHHmmss');
+      // Tạo tham số cho VNPay theo chuẩn v2.1.0
+      const tmnCode = this.tmnCode;
+      const createDate = moment().format('YYYYMMDDHHmmss');
+      const orderId = sanitizedOrderCode + createDate.substring(8, 14);
 
-      // QUAN TRỌNG: Sử dụng đúng định dạng và số lượng tham số
       const vnpParams = {
         vnp_Version: '2.1.0',
         vnp_Command: 'pay',
-        vnp_TmnCode: this.tmnCode,
+        vnp_TmnCode: tmnCode,
         vnp_Locale: 'vn',
         vnp_CurrCode: 'VND',
-        vnp_TxnRef: sanitizedOrderCode,
-        vnp_OrderInfo: `Thanh toan don hang ${sanitizedOrderCode}`,
-        vnp_OrderType: 'billpayment',
+        vnp_TxnRef: orderId,
+        vnp_OrderInfo: `Thanh toan don hang ${order.orderCode}`,
+        vnp_OrderType: 'other',
         vnp_Amount: amount,
         vnp_ReturnUrl: this.returnUrl,
-        vnp_IpAddr: '127.0.0.1', // Thay đổi từ ::1 sang 127.0.0.1
+        vnp_IpAddr: ipAddr.replace(/\:\:1/g, '127.0.0.1'),
         vnp_CreateDate: createDate,
-        vnp_BankCode: '', // Thêm tham số trống để VNPAY hiển thị tất cả ngân hàng
       };
 
-      console.log('Tham số VNPAY:', vnpParams);
+      console.log('Tham số VNPay trước khi sắp xếp:', vnpParams);
 
-      // Sắp xếp tham số
+      // Sắp xếp tham số theo thứ tự a-z
       const sortedParams = this.sortObject(vnpParams);
+      console.log('Tham số VNPay sau khi sắp xếp:', sortedParams);
 
-      // Tạo chuỗi ký chính xác từ các tham số đã sắp xếp
-      const signData = this.buildSignatureString(sortedParams);
-      console.log('Chuỗi ký:', signData);
+      // Tạo chuỗi query string từ tham số đã sắp xếp
+      // THAY ĐỔI: Sử dụng hàm mặc định để URL encode đúng cách
+      const signData = querystring.stringify(sortedParams);
+      console.log('Chuỗi dữ liệu ký:', signData);
 
-      // Tạo chữ ký với HMAC SHA512
+      // Tạo chữ ký bằng HMAC SHA512
       const hmac = crypto.createHmac('sha512', this.hashSecret);
       const signed = hmac.update(Buffer.from(signData, 'utf-8')).digest('hex');
-      console.log('Chữ ký:', signed);
 
-      // Tạo URL đúng cách - QUAN TRỌNG: sử dụng querystring.stringify để xử lý đúng 
-      // việc mã hóa URL (tránh lỗi với các ký tự đặc biệt)
-      const secureHash = signed;
-      sortedParams.vnp_SecureHash = secureHash;
+      console.log('Chữ ký được tạo:', signed);
 
-      // Tạo URL với các tham số đã được mã hóa đúng
+      // Thêm chữ ký vào tham số
+      sortedParams.vnp_SecureHash = signed;
+
+      // Tạo URL thanh toán
       const paymentUrl = this.vnpUrl + '?' + querystring.stringify(sortedParams);
-
-      console.log('URL thanh toán VNPAY:', paymentUrl);
+      console.log('URL thanh toán VNPay:', paymentUrl);
 
       return paymentUrl;
     } catch (error) {
-      console.error('Lỗi khi tạo URL thanh toán VNPAY:', error);
-      throw new ApiError(500, `Không thể tạo URL thanh toán VNPAY: ${error.message}`);
+      console.error('Lỗi khi tạo URL thanh toán VNPay:', error);
+      throw new ApiError(500, `Không thể tạo URL thanh toán VNPay: ${error.message}`);
     }
   }
 
-  // Hàm xây dựng chuỗi ký CHÍNH XÁC cho VNPAY
-  buildSignatureString(params) {
-    // Tạo chuỗi ký theo đúng định dạng VNPAY yêu cầu
-    return Object.keys(params)
-      .map(key => `${key}=${encodeURIComponent(params[key])}`)
-      .join('&');
-  }
-
-  /**
-   * Xử lý callback từ VNPAY
-   * @param {Object} vnpParams - Tham số callback từ VNPAY
-   * @returns {Promise<Object>} Kết quả xử lý callback
-   */
+  // Xử lý callback từ VNPay
   async processCallback(vnpParams) {
     try {
-      console.log('Processing VNPAY callback:', vnpParams);
+      console.log('Nhận callback từ VNPay:', JSON.stringify(vnpParams));
 
       // Kiểm tra xem có dữ liệu không
       if (!vnpParams || Object.keys(vnpParams).length === 0) {
-        console.error('VNPAY callback empty params');
+        console.error('VNPay callback: Không có tham số');
         return {
           success: false,
-          message: 'Không nhận được dữ liệu từ VNPAY'
-        };
-      }
-
-      // Kiểm tra các tham số bắt buộc
-      if (!vnpParams.vnp_TxnRef || !vnpParams.vnp_ResponseCode) {
-        console.error('VNPAY callback missing required params');
-        return {
-          success: false,
-          message: 'Thiếu tham số bắt buộc từ VNPAY'
+          message: 'Không nhận được dữ liệu từ VNPay'
         };
       }
 
       // Lấy secure hash từ tham số
-      const secureHash = vnpParams.vnp_SecureHash;
+      const vnp_SecureHash = vnpParams.vnp_SecureHash;
 
-      // Trong môi trường test, có thể bỏ qua kiểm tra chữ ký
-      if (!secureHash) {
-        console.error('VNPAY callback missing vnp_SecureHash');
+      // Kiểm tra các tham số bắt buộc
+      if (!vnpParams.vnp_TxnRef || !vnpParams.vnp_ResponseCode) {
+        console.error('VNPay callback: Thiếu tham số bắt buộc');
+        return {
+          success: false,
+          message: 'Thiếu tham số bắt buộc từ VNPay'
+        };
+      }
+
+      if (!vnp_SecureHash) {
+        console.error('VNPay callback: Thiếu chữ ký xác thực (vnp_SecureHash)');
         if (this.isTestMode) {
-          console.log('Test mode: Skipping signature verification');
+          console.log('Chế độ thử nghiệm: Bỏ qua kiểm tra chữ ký');
         } else {
           return {
             success: false,
@@ -175,37 +151,49 @@ class VnpayService {
           };
         }
       } else {
-        // Tạo bản sao không có secure hash để tính lại
+        // Tạo bản sao params không có secure hash để tính lại
         const vnpParamsCopy = { ...vnpParams };
         delete vnpParamsCopy.vnp_SecureHash;
         delete vnpParamsCopy.vnp_SecureHashType;
 
-        // Sắp xếp và tạo chuỗi ký
+        // Sắp xếp tham số theo thứ tự a-z
         const sortedParams = this.sortObject(vnpParamsCopy);
-        const signData = this.buildSignatureString(sortedParams);
-        console.log('VNPAY callback sign data:', signData);
 
+        // Tạo chuỗi query để ký (cùng cách với lúc tạo URL)
+        // THAY ĐỔI: Sử dụng hàm mặc định để URL encode đúng cách
+        const signData = querystring.stringify(sortedParams);
+        console.log('Callback - Chuỗi dữ liệu để ký:', signData);
+
+        // Tạo chữ ký
         const hmac = crypto.createHmac('sha512', this.hashSecret);
-        const signed = hmac.update(signData, 'utf-8').digest('hex');
-        console.log('VNPAY callback calculated hash:', signed);
-        console.log('VNPAY callback received hash:', secureHash);
+        const signed = hmac.update(Buffer.from(signData, 'utf-8')).digest('hex');
+
+        console.log('Callback - Chữ ký tính được:', signed);
+        console.log('Callback - Chữ ký nhận được:', vnp_SecureHash);
 
         // Kiểm tra chữ ký
-        if (secureHash !== signed && !this.isTestMode) {
-          console.error('VNPAY signature verification failed');
-          return {
-            success: false,
-            message: 'Chữ ký không hợp lệ'
-          };
+        if (vnp_SecureHash !== signed) {
+          console.error('VNPay callback: Chữ ký không hợp lệ');
+          console.error('Chữ ký tính toán: ' + signed);
+          console.error('Chữ ký nhận được: ' + vnp_SecureHash);
+
+          if (!this.isTestMode) {
+            return {
+              success: false,
+              message: 'Chữ ký không hợp lệ'
+            };
+          } else {
+            console.log('Chế độ thử nghiệm: Tiếp tục mặc dù chữ ký không khớp');
+          }
         }
       }
 
       // Kiểm tra mã phản hồi
       const responseCode = vnpParams.vnp_ResponseCode;
-      console.log('VNPAY response code:', responseCode);
+      console.log('VNPay response code:', responseCode);
 
       if (responseCode !== '00') {
-        console.warn(`VNPAY transaction failed: ${this.getResponseMessage(responseCode)}`);
+        console.warn(`Giao dịch VNPay thất bại: ${this.getResponseMessage(responseCode)}`);
         return {
           success: false,
           message: this.getResponseMessage(responseCode),
@@ -213,7 +201,7 @@ class VnpayService {
         };
       }
 
-      // Thành công
+      // Nếu thành công trả về kết quả giao dịch
       return {
         success: true,
         orderCode: vnpParams.vnp_TxnRef,
@@ -226,16 +214,11 @@ class VnpayService {
         message: 'Thanh toán thành công'
       };
     } catch (error) {
-      console.error('Lỗi xử lý callback từ VNPAY:', error);
-      throw new ApiError(500, 'Không thể xử lý callback từ VNPAY');
+      console.error('Lỗi xử lý callback từ VNPay:', error);
+      throw new ApiError(500, 'Không thể xử lý callback từ VNPay');
     }
   }
 
-  /**
-   * Lấy thông báo dựa trên mã phản hồi
-   * @param {string} responseCode - Mã phản hồi từ VNPAY
-   * @returns {string} Thông báo tương ứng
-   */
   getResponseMessage(responseCode) {
     const messages = {
       '00': 'Giao dịch thành công',
@@ -257,7 +240,7 @@ class VnpayService {
       '75': 'Ngân hàng thanh toán đang bảo trì',
       '79': 'Giao dịch không thành công do: KH nhập sai mật khẩu thanh toán nhiều lần',
       '99': 'Lỗi không xác định',
-      '70': 'Sai chữ ký', // Thêm mã lỗi 70 - Sai chữ ký
+      '70': 'Sai chữ ký',
     };
 
     return messages[responseCode] || 'Giao dịch không thành công';

@@ -213,16 +213,32 @@ exports.verifyEmail = async (req, res, next) => {
   try {
     const { token } = req.params;
 
+    // Log token để debug
+    console.log('Verification Token Received:', token);
+
     if (!token) {
-      throw new ApiError(400, 'Token xác thực không hợp lệ');
+      return res.status(400).json({
+        success: false,
+        message: 'Token xác thực không hợp lệ'
+      });
     }
 
     // Tìm khách hàng theo token xác thực
     const customer = await Customer.findOne({ verificationToken: token });
 
     if (!customer) {
-      throw new ApiError(400, 'Token xác thực không hợp lệ hoặc đã hết hạn');
+      return res.status(400).json({
+        success: false,
+        message: 'Token xác thực không hợp lệ hoặc đã hết hạn'
+      });
     }
+
+    // Log thông tin khách hàng để debug
+    console.log('Customer Found:', {
+      email: customer.email,
+      isVerified: customer.isVerified,
+      verificationToken: customer.verificationToken
+    });
 
     // Cập nhật trạng thái xác thực và xóa token
     customer.isVerified = true;
@@ -230,9 +246,14 @@ exports.verifyEmail = async (req, res, next) => {
 
     await customer.save();
 
-    // Chuyển hướng đến trang thành công
-    res.redirect(`${process.env.CLIENT_URL}/verify-success`);
+    // Trả về JSON response thành công
+    res.status(200).json({
+      success: true,
+      message: 'Xác thực email thành công',
+      redirectUrl: `${process.env.CLIENT_URL}/verify-success`
+    });
   } catch (error) {
+    console.error('Email Verification Error:', error);
     next(error);
   }
 };
