@@ -3,6 +3,7 @@ const express = require('express');
 
 // Import admin routes
 const adminProductRoutes = require('./admin/productRoutes');
+const adminDashboardRoutes = require('./admin/dashboardRoutes');
 const adminCategoryRoutes = require('./admin/categoryRoutes');
 const adminUserRoutes = require('./admin/userRoutes');
 const adminRoleRoutes = require('./admin/roleRoutes');
@@ -28,6 +29,7 @@ const clientNotificationRoutes = require('./client/notificationRoutes');
 // Nhóm routes admin
 const adminRouter = express.Router();
 adminRouter.use('/auth', adminAuthRoutes);
+adminRouter.use('/dashboard', adminDashboardRoutes);
 adminRouter.use('/profile', adminProfileRoutes);
 adminRouter.use('/users', adminUserRoutes);
 adminRouter.use('/roles', adminRoleRoutes);

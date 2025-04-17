@@ -5,6 +5,9 @@ let io;
 const currentAdminOperations = new Map();
 const userSocketMap = new Map();
 
+// Giới hạn kích thước các Map
+const MAX_USER_SOCKET_MAP = 10000;
+const MAX_RECENT_NOTIFICATIONS = 1000;
 const recentNotifications = new Map();
 
 const notificationConfig = {
@@ -36,6 +39,55 @@ const lastGroupSentTime = {
   'cancelled-by-user': 0,
   'system': 0
 };
+
+// Hàm thêm thông báo với kiểm soát kích thước
+function addToRecentNotifications(key, timestamp) {
+  // Nếu đạt kích thước tối đa, xóa 20% mục cũ nhất
+  if (recentNotifications.size >= MAX_RECENT_NOTIFICATIONS) {
+    const keysToDelete = [...recentNotifications.entries()]
+      .sort((a, b) => a[1] - b[1])  // Sắp xếp theo thời gian (cũ nhất trước)
+      .slice(0, Math.floor(MAX_RECENT_NOTIFICATIONS * 0.2))  // Lấy 20% cũ nhất
+      .map(entry => entry[0]);  // Lấy keys
+
+    keysToDelete.forEach(key => recentNotifications.delete(key));
+    console.log(`[SOCKET] Đã xóa ${keysToDelete.length} mục cũ trong recentNotifications`);
+  }
+
+  recentNotifications.set(key, timestamp);
+}
+
+// Hàm dọn dẹp bộ nhớ định kỳ
+function cleanupMemory() {
+  // Dọn dẹp các socket không hợp lệ trong userSocketMap
+  for (const [userKey, socketId] of userSocketMap.entries()) {
+    const socket = io.sockets.sockets.get(socketId);
+    if (!socket || !socket.connected) {
+      userSocketMap.delete(userKey);
+      console.log(`[SOCKET] Xóa mapping không hợp lệ: ${userKey}`);
+    }
+  }
+
+  // Giới hạn kích thước userSocketMap nếu quá lớn
+  if (userSocketMap.size > MAX_USER_SOCKET_MAP) {
+    const keysToDelete = [...userSocketMap.keys()].slice(0, 100);
+    keysToDelete.forEach(key => userSocketMap.delete(key));
+    console.log(`[SOCKET] Đã xóa ${keysToDelete.length} socket mapping cũ`);
+  }
+
+  // Đảm bảo currentAdminOperations không tích tụ
+  const now = Date.now();
+  let cleanedAdminOps = 0;
+  for (const [key, timestamp] of currentAdminOperations.entries()) {
+    if (now - timestamp > 30000) { // Xóa các thao tác cũ hơn 30 giây
+      currentAdminOperations.delete(key);
+      cleanedAdminOps++;
+    }
+  }
+
+  if (cleanedAdminOps > 0) {
+    console.log(`[SOCKET] Đã xóa ${cleanedAdminOps} thao tác admin cũ`);
+  }
+}
 
 exports.initialize = (socketIO) => {
   io = socketIO;
@@ -216,6 +268,9 @@ exports.initialize = (socketIO) => {
     });
   });
 
+  // Khởi động tác vụ dọn dẹp bộ nhớ định kỳ
+  setInterval(cleanupMemory, 60000); // Dọn dẹp mỗi phút
+
   return io;
 };
 
@@ -353,7 +408,6 @@ exports.registerAdminOperation = (adminId, operationType, targetId) => {
   return true;
 };
 
-// HÀM ĐÃ ĐƯỢC CẬP NHẬT
 exports.notifyNewOrder = async (orderData) => {
   if (!io) {
     console.error(`[${new Date().toISOString()}] IO chưa được khởi tạo, không thể gửi thông báo`);
@@ -378,13 +432,8 @@ exports.notifyNewOrder = async (orderData) => {
       }
     }
 
-    // Đánh dấu đã xử lý thông báo này
-    recentNotifications.set(notificationKey, now);
-
-    // Tự động xóa khỏi danh sách sau 5 phút để tránh memory leak
-    setTimeout(() => {
-      recentNotifications.delete(notificationKey);
-    }, 300000);
+    // Sử dụng hàm mới để quản lý recentNotifications
+    addToRecentNotifications(notificationKey, now);
 
     const shouldGroup = groupedNotifications[type].length > 0 &&
       now - lastGroupSentTime[type] < notificationConfig.GROUP_WINDOW;
@@ -416,7 +465,7 @@ exports.notifyNewOrder = async (orderData) => {
         console.log(`[SOCKET] Đã lưu thông báo mới: ${notification._id}`);
       }
 
-      // Gửi thông báo qua socket - CHÚNG TA CHỈ GỬI MỘT LẦN Ở ĐÂY
+      // Gửi thông báo qua socket
       io.to('admin-channel').emit('new-order', {
         ...orderData,
         notificationId: notification._id.toString(),
@@ -478,12 +527,12 @@ exports.notifyOrderStatusUpdate = async (order, adminId = null) => {
       if (customerCount > 0 && shouldSendToCustomer) {
         io.to(customerRoom).emit('order-status-update', notificationData);
 
-        recentNotifications.set(customerNotificationKey, now);
+        // Sử dụng hàm mới để quản lý recentNotifications
+        addToRecentNotifications(customerNotificationKey, now);
 
         console.log(`[SOCKET] Đã gửi thông báo cập nhật đơn hàng #${order.orderCode} đến khách hàng ${customerId}`);
       } else {
         console.log(`[SOCKET] ${!shouldSendToCustomer ? 'Bỏ qua thông báo trùng lặp' : 'Khách hàng không online'}, tạo thông báo trong DB`);
-
 
         try {
           const notification = new Notification({
@@ -531,7 +580,8 @@ exports.notifyOrderStatusUpdate = async (order, adminId = null) => {
         return;
       }
 
-      recentNotifications.set(adminNotificationKey, now);
+      // Sử dụng hàm mới để quản lý recentNotifications
+      addToRecentNotifications(adminNotificationKey, now);
 
       const type = 'order-status-update';
       const shouldGroup = groupedNotifications[type].length > 0 &&
