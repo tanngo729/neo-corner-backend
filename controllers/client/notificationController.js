@@ -49,16 +49,22 @@ exports.markAsRead = async (req, res, next) => {
       throw new ApiError(400, 'Danh sách ID thông báo không hợp lệ');
     }
 
-    const result = await Notification.updateMany(
-      {
-        _id: { $in: notificationIds },
-        customerId,
-        forAdmin: false
-      },
-      { read: true }
-    );
+        const { Types } = require('mongoose');
+    const validIds = notificationIds.filter(id => Types.ObjectId.isValid(id));
 
-    // Đồng bộ trạng thái đã đọc
+    let result = { modifiedCount: 0 };
+    if (validIds.length > 0) {
+      result = await Notification.updateMany(
+        {
+          _id: { $in: validIds },
+          customerId,
+          forAdmin: false
+        },
+        { read: true }
+      );
+    }
+
+    // Sync via socket for all IDs (including temp ones)
     notificationIds.forEach(notificationId => {
       socketManager.markNotificationRead(notificationId, customerId, false);
     });
@@ -108,6 +114,18 @@ exports.deleteNotification = async (req, res, next) => {
     const notificationId = req.params.id;
     const customerId = req.user.id;
 
+    const { Types } = require('mongoose');
+    if (!Types.ObjectId.isValid(notificationId)) {
+      // Treat as already removed (optimistic UI) and emit deletion
+      if (socketManager.getIO()) {
+        socketManager.getIO().to(`customer:${customerId}`).emit('notification-deleted', {
+          id: notificationId,
+          timestamp: new Date().toISOString()
+        });
+      }
+      return ApiResponse.success(res, 200, null, 'Xóa thông báo thành công');
+    }
+
     const notification = await Notification.findOne({
       _id: notificationId,
       customerId,
@@ -150,3 +168,5 @@ exports.countUnread = async (req, res, next) => {
     next(error);
   }
 };
+
+

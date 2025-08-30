@@ -1,12 +1,13 @@
-// backend/controllers/client/orderController.js - Enhanced version
+// controllers/client/orderController.js
 const Order = require('../../models/Order');
 const Product = require('../../models/Product');
+const Promotion = require('../../models/Promotion'); // Thêm import model Promotion
 const Notification = require('../../models/Notification');
 const { ApiError } = require('../../utils/errorHandler');
 const ApiResponse = require('../../utils/apiResponder');
 const socketManager = require('../../utils/socketManager');
 
-// Create new order - IMPROVED
+// Create new order - IMPROVED with promotion handling
 exports.createOrder = async (req, res, next) => {
   try {
     const {
@@ -60,7 +61,63 @@ exports.createOrder = async (req, res, next) => {
 
     const shippingFee = totalAmount >= 300000 ? 0 : 30000;
 
+    // XỬ LÝ MÃ KHUYẾN MÃI
     let discount = 0;
+    let couponInfo = null;
+
+    if (couponCode) {
+      // Tìm khuyến mãi theo mã
+      const promotion = await Promotion.findByCode(couponCode);
+
+      if (!promotion) {
+        throw new ApiError(404, 'Mã khuyến mãi không tồn tại');
+      }
+
+      // Kiểm tra khuyến mãi có hợp lệ không
+      if (!promotion.isValidPromotion()) {
+        if (promotion.expiry && promotion.expiry < new Date()) {
+          throw new ApiError(400, 'Mã khuyến mãi đã hết hạn');
+        }
+        if (promotion.startDate && promotion.startDate > new Date()) {
+          throw new ApiError(400, 'Mã khuyến mãi chưa bắt đầu');
+        }
+        if (!promotion.isActive) {
+          throw new ApiError(400, 'Mã khuyến mãi không khả dụng');
+        }
+        if (promotion.maxUses > 0 && promotion.usedCount >= promotion.maxUses) {
+          throw new ApiError(400, 'Mã khuyến mãi đã đạt giới hạn sử dụng');
+        }
+      }
+
+      // Kiểm tra giá trị tối thiểu
+      if (promotion.minPurchase > 0 && totalAmount < promotion.minPurchase) {
+        throw new ApiError(
+          400,
+          `Giá trị đơn hàng phải từ ${promotion.minPurchase.toLocaleString()}đ trở lên`
+        );
+      }
+
+      // Tính toán giảm giá
+      if (promotion.discountType === 'percent') {
+        discount = totalAmount * (promotion.discountValue / 100);
+      } else { // fixed discount
+        discount = Math.min(promotion.discountValue, totalAmount);
+      }
+
+      couponInfo = {
+        code: promotion.code,
+        discountType: promotion.discountType,
+        discountValue: promotion.discountValue,
+        discountAmount: discount,
+        promotionId: promotion._id
+      };
+
+      // Tăng số lần sử dụng khuyến mãi
+      await Promotion.findByIdAndUpdate(
+        promotion._id,
+        { $inc: { usedCount: 1 } }
+      );
+    }
 
     const grandTotal = totalAmount + shippingFee - discount;
 
@@ -82,6 +139,8 @@ exports.createOrder = async (req, res, next) => {
       subtotal: totalAmount,
       shippingFee,
       discount,
+      couponCode: couponCode, // Lưu couponCode để tương thích ngược
+      coupon: couponInfo, // Lưu thông tin coupon chi tiết
       total: grandTotal,
       status: initialOrderStatus,
       payment: {
@@ -89,7 +148,6 @@ exports.createOrder = async (req, res, next) => {
       },
       totalItems,
       notes: note,
-      couponCode,
       orderCode: generateOrderCode(),
       stockUpdated: false,
       isGuest: !req.user
@@ -123,7 +181,9 @@ exports.createOrder = async (req, res, next) => {
         // Thêm các thông tin chi tiết khác
         customerName: shippingInfo.fullName,
         customerPhone: shippingInfo.phone,
-        paymentMethod: paymentMethod
+        paymentMethod: paymentMethod,
+        couponCode: couponCode, // Thêm thông tin về mã giảm giá
+        discount: discount // Thêm thông tin về số tiền giảm giá
       };
 
       console.log(`[THÔNG BÁO ĐƠN HÀNG] Đơn hàng mới #${order.orderCode} - Đang gửi thông báo qua socket`);
@@ -148,16 +208,6 @@ exports.createOrder = async (req, res, next) => {
         ...notificationData,
         notificationId: notification._id.toString()
       });
-
-      // XÓA HOẶC COMMENT ĐOẠN CODE NÀY
-      // // GỬI THÔNG BÁO BROADCAST KHẨN CẤP (để đảm bảo có thông báo)
-      // if (socketManager.getIO()) {
-      //   socketManager.getIO().emit('new-order', {
-      //     ...notificationData,
-      //     urgent: true
-      //   });
-      //   console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã gửi broadcast thông báo khẩn cấp cho đơn hàng #${order.orderCode}`);
-      // }
     } catch (notifyError) {
       console.error('Lỗi khi gửi thông báo đơn hàng:', notifyError);
       // Vẫn tiếp tục xử lý, không ảnh hưởng đến việc tạo đơn hàng
@@ -169,7 +219,7 @@ exports.createOrder = async (req, res, next) => {
   }
 };
 
-// Get user's orders
+// Các phương thức khác giữ nguyên
 exports.getMyOrders = async (req, res, next) => {
   try {
     const { page = 1, limit = 10, status } = req.query;
@@ -200,7 +250,6 @@ exports.getMyOrders = async (req, res, next) => {
   }
 };
 
-// Get order details
 exports.getOrderDetail = async (req, res, next) => {
   try {
     const order = await Order.findOne({
@@ -218,7 +267,6 @@ exports.getOrderDetail = async (req, res, next) => {
   }
 };
 
-// Cancel order - IMPROVED
 exports.cancelOrder = async (req, res, next) => {
   try {
     const order = await Order.findOne({
@@ -302,7 +350,6 @@ exports.cancelOrder = async (req, res, next) => {
   }
 };
 
-// Check order by number (for guests)
 exports.checkOrderByNumber = async (req, res, next) => {
   try {
     const { orderCode, phone } = req.body;

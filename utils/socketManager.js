@@ -12,7 +12,8 @@ const recentNotifications = new Map();
 
 const notificationConfig = {
   THROTTLE_TIME: {
-    'new-order': 10000,
+    // Send new-order events promptly; only light throttle to prevent duplicates
+    'new-order': 3000,
     'order-status-update': 5000,
     'cancelled-by-user': 5000,
     'system': 20000
@@ -180,6 +181,25 @@ exports.initialize = (socketIO) => {
         if (!notificationId) {
           return socket.emit('notification-read-error', { message: 'Thiếu thông tin thông báo' });
         }
+
+        // Skip DB update for temp IDs (e.g., 'temp-...') to avoid cast errors
+        try {
+          const { Types } = require('mongoose');
+          if (!Types.ObjectId.isValid(notificationId)) {
+            socket.emit('notification-marked-read', {
+              id: notificationId,
+              success: true,
+              timestamp: new Date().toISOString()
+            });
+            if (isAdmin) {
+              socket.to('admin-channel').emit('admin-notification-read', {
+                id: notificationId,
+                readBy: userId
+              });
+            }
+            return;
+          }
+        } catch (_) {}
 
         const query = { _id: notificationId };
 
@@ -422,6 +442,7 @@ exports.notifyNewOrder = async (orderData) => {
     const notificationKey = createNotificationKey(orderData);
     const now = Date.now();
     const type = orderData.type || 'new-order';
+    const isNewOrder = type === 'new-order';
 
     // Kiểm tra đã gửi thông báo này gần đây chưa để tránh trùng lặp
     if (recentNotifications.has(notificationKey)) {
@@ -435,7 +456,8 @@ exports.notifyNewOrder = async (orderData) => {
     // Sử dụng hàm mới để quản lý recentNotifications
     addToRecentNotifications(notificationKey, now);
 
-    const shouldGroup = groupedNotifications[type].length > 0 &&
+    // Do not defer real-time for new orders; always send immediately
+    const shouldGroup = !isNewOrder && groupedNotifications[type].length > 0 &&
       now - lastGroupSentTime[type] < notificationConfig.GROUP_WINDOW;
 
     if (shouldGroup && groupedNotifications[type].length < notificationConfig.MAX_NOTIFICATIONS[type]) {
@@ -633,6 +655,17 @@ exports.markNotificationRead = async (notificationId, userId, isAdmin) => {
   }
 
   try {
+    const { Types } = require('mongoose');
+    if (!Types.ObjectId.isValid(notificationId)) {
+      // Emit ack only for temp IDs
+      if (isAdmin) {
+        io.to('admin-channel').emit('admin-notification-read', { id: notificationId, readBy: userId });
+      } else {
+        io.to(`customer:${userId}`).emit('notification-marked-read', { id: notificationId, success: true });
+      }
+      return true;
+    }
+
     const query = { _id: notificationId };
 
     if (isAdmin) {

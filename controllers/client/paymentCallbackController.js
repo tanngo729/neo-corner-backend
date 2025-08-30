@@ -6,6 +6,8 @@ const Product = require('../../models/Product');
 const PaymentMethod = require('../../models/PaymentMethod');
 const MomoService = require('../../services/payment/momoService');
 const VnpayService = require('../../services/payment/vnpayService');
+const Notification = require('../../models/Notification'); // Import Notification
+const socketManager = require('../../utils/socketManager'); // Import socketManager
 
 /**
  * Hàm xử lý chung cho các callback thanh toán
@@ -106,6 +108,43 @@ async function processPaymentCallback(orderCode, paymentMethod, transactionInfo)
       console.log(`[processPaymentCallback] Tồn kho đã được cập nhật trước đó cho đơn hàng ${orderCode}`);
     }
 
+    // GỬI THÔNG BÁO ĐƠN HÀNG MỚI SAU KHI THANH TOÁN THÀNH CÔNG
+    try {
+      const notification = new Notification({
+        type: 'new-order',
+        orderId: order._id,
+        orderCode: order.orderCode,
+        title: `Đơn hàng mới #${order.orderCode} (Đã thanh toán)`,
+        description: `Đơn hàng từ ${order.shippingAddress.fullName} - ${order.total.toLocaleString()} VND`,
+        status: order.status,
+        forAdmin: true,
+        read: false
+      });
+
+      await notification.save({ session });
+      console.log(`[processPaymentCallback] Đã lưu thông báo đơn hàng ${order.orderCode} vào database`);
+
+      await socketManager.notifyNewOrder({
+        _id: order._id.toString(),
+        orderId: order._id.toString(),
+        orderCode: order.orderCode,
+        total: order.total,
+        status: order.status,
+        type: 'new-order',
+        timestamp: new Date(),
+        customerName: order.shippingAddress.fullName,
+        customerPhone: order.shippingAddress.phone,
+        paymentMethod: paymentMethod,
+        notificationId: notification._id.toString(),
+        isPaid: true
+      });
+
+      console.log(`[processPaymentCallback] Đã gửi thông báo đơn hàng #${order.orderCode} sau khi thanh toán thành công`);
+    } catch (notifyError) {
+      console.error('[processPaymentCallback] Lỗi khi gửi thông báo đơn hàng:', notifyError);
+      // Không ảnh hưởng đến việc xử lý thanh toán, chỉ log lỗi
+    }
+
     // Commit transaction
     await session.commitTransaction();
     session.endSession();
@@ -114,7 +153,8 @@ async function processPaymentCallback(orderCode, paymentMethod, transactionInfo)
     return {
       success: true,
       message: 'Xử lý thanh toán thành công',
-      orderCode: order.orderCode
+      orderCode: order.orderCode,
+      notified: true // Đánh dấu đã gửi thông báo
     };
   } catch (error) {
     // Rollback nếu có lỗi
@@ -135,7 +175,7 @@ async function processPaymentCallback(orderCode, paymentMethod, transactionInfo)
  */
 exports.momoCallback = async (req, res, next) => {
   try {
-    console.log('MoMo Callback đã nhận:', JSON.stringify(req.body, null, 2));
+    console.log('[MOMO CALLBACK] Dữ liệu nhận được:', JSON.stringify(req.body, null, 2));
 
     // Trả về HTTP 200 ngay lập tức để MoMo không gửi lại callback
     res.status(200).json({ message: 'Đã nhận callback' });
@@ -149,9 +189,9 @@ exports.momoCallback = async (req, res, next) => {
           try {
             const decodedData = JSON.parse(Buffer.from(req.body.extraData, 'base64').toString());
             orderCode = decodedData.orderCode;
-            console.log('Trích xuất orderCode từ extraData:', orderCode);
+            console.log('[MOMO CALLBACK] Trích xuất orderCode từ extraData:', orderCode);
           } catch (error) {
-            console.error('Lỗi giải mã extraData:', error);
+            console.error('[MOMO CALLBACK] Lỗi giải mã extraData:', error);
           }
         }
 
@@ -164,66 +204,53 @@ exports.momoCallback = async (req, res, next) => {
         }
 
         if (!orderCode) {
-          console.error('Không thể xác định mã đơn hàng từ callback MoMo');
+          console.error('[MOMO CALLBACK] Không thể xác định mã đơn hàng từ callback MoMo');
           return;
         }
 
-        // Cập nhật đơn hàng trực tiếp, không dùng transaction
-        const order = await Order.findOne({ orderCode, paymentMethod: 'MOMO' });
+        // Kiểm tra kết quả thanh toán từ MoMo
+        const resultCode = req.body.resultCode;
 
-        if (!order) {
-          console.error(`Không tìm thấy đơn hàng với mã ${orderCode}`);
-          return;
-        }
+        if (resultCode === '0' || resultCode === 0) {
+          console.log(`[MOMO CALLBACK] Thanh toán thành công cho đơn hàng ${orderCode}`);
 
-        if (order.payment.status === 'COMPLETED') {
-          console.log(`Đơn hàng ${orderCode} đã thanh toán trước đó`);
-          return;
-        }
+          // Xử lý đơn hàng
+          const transactionInfo = {
+            transactionId: req.body.transId,
+            amount: req.body.amount,
+            responseTime: req.body.responseTime,
+            message: req.body.message,
+            payType: req.body.payType,
+            signature: req.body.signature
+          };
 
-        // Cập nhật trạng thái đơn hàng
-        order.status = 'PROCESSING';
-        order.payment.status = 'COMPLETED';
-        order.payment.transactionId = req.body.transId;
-        order.payment.paidAt = new Date();
+          // Sử dụng hàm xử lý chung
+          const result = await processPaymentCallback(orderCode, 'MOMO', transactionInfo);
 
-        await order.save();
-        console.log(`Đã cập nhật trạng thái đơn hàng ${orderCode}`);
-
-        // Cập nhật tồn kho nếu chưa cập nhật
-        if (!order.stockUpdated) {
-          for (const item of order.items) {
-            if (!item.product) continue;
-
-            try {
-              await Product.findByIdAndUpdate(
-                item.product,
-                { $inc: { stock: -item.quantity, sold: item.quantity || 0 } }
-              );
-            } catch (err) {
-              console.error(`Lỗi cập nhật tồn kho sản phẩm ${item.product}:`, err);
-            }
+          if (result.success) {
+            console.log(`[MOMO CALLBACK] Đã xử lý thành công thanh toán cho đơn hàng ${orderCode}`);
+          } else {
+            console.error(`[MOMO CALLBACK] Lỗi xử lý thanh toán: ${result.message}`);
           }
+        } else {
+          console.log(`[MOMO CALLBACK] Thanh toán thất bại cho đơn hàng ${orderCode}, mã lỗi: ${resultCode}`);
 
-          order.stockUpdated = true;
-          await order.save();
-
-          if (order.user) {
-            await Cart.findOneAndUpdate(
-              { user: order.user },
-              { items: [], couponCode: null, couponDiscount: 0 }
-            );
+          // Cập nhật trạng thái thanh toán thất bại
+          const order = await Order.findOne({ orderCode });
+          if (order) {
+            order.payment.status = 'FAILED';
+            order.payment.transactionInfo = req.body;
+            await order.save();
+            console.log(`[MOMO CALLBACK] Đã cập nhật trạng thái thất bại cho đơn hàng ${orderCode}`);
           }
         }
-
-        console.log(`Hoàn tất xử lý callback cho đơn hàng ${orderCode}`);
       } catch (error) {
-        console.error('Lỗi xử lý background MoMo callback:', error);
+        console.error('[MOMO CALLBACK] Lỗi xử lý background:', error);
       }
     }, 0);
 
   } catch (error) {
-    console.error('Lỗi xử lý callback MoMo:', error);
+    console.error('[MOMO CALLBACK] Lỗi xử lý callback MoMo:', error);
     // Luôn trả về 200 để MoMo không gửi lại
     return res.status(200).json({ message: 'Lỗi xử lý nhưng đã xác nhận' });
   }
@@ -234,12 +261,12 @@ exports.momoCallback = async (req, res, next) => {
  */
 exports.vnpayCallback = async (req, res, next) => {
   try {
-    console.log('Nhận callback từ VNPAY:', req.query);
+    console.log('[VNPAY CALLBACK] Dữ liệu nhận được:', req.query);
 
     // Lấy cấu hình VNPAY
     const vnpayConfig = await PaymentMethod.findOne({ code: 'VNPAY', isActive: true });
     if (!vnpayConfig) {
-      console.error('Không tìm thấy cấu hình VNPAY');
+      console.error('[VNPAY CALLBACK] Không tìm thấy cấu hình VNPAY');
       return res.redirect(`${process.env.CLIENT_URL}/payment/result?status=error&message=Phương thức thanh toán VNPAY không khả dụng`);
     }
 
@@ -252,34 +279,34 @@ exports.vnpayCallback = async (req, res, next) => {
 
     // Nếu không thành công, chuyển hướng ngay
     if (!isSuccess) {
-      console.log(`Thanh toán VNPAY không thành công, vnp_ResponseCode=${responseCode}`);
+      console.log(`[VNPAY CALLBACK] Thanh toán không thành công, vnp_ResponseCode=${responseCode}`);
       return res.redirect(`${process.env.CLIENT_URL}/payment/result?status=error&message=Thanh toán không thành công&code=${responseCode}`);
     }
 
     // Xử lý callback
     const result = await vnpayService.processCallback(req.query);
-    console.log('Kết quả xử lý callback VNPAY:', result);
+    console.log('[VNPAY CALLBACK] Kết quả xử lý callback VNPAY:', result);
 
     if (result.success) {
       // Lấy mã đơn hàng từ kết quả hoặc từ vnp_TxnRef
       let orderCode = result.orderCode || req.query.vnp_TxnRef;
-      console.log('Tìm đơn hàng với mã:', orderCode);
+      console.log('[VNPAY CALLBACK] Tìm đơn hàng với mã:', orderCode);
 
       // Nếu không có mã đơn hàng, thử tìm trong OrderInfo
       if (!orderCode && req.query.vnp_OrderInfo) {
         const match = req.query.vnp_OrderInfo.match(/DH\d+/);
         if (match) {
           orderCode = match[0];
-          console.log('Tìm thấy mã đơn hàng trong vnp_OrderInfo:', orderCode);
+          console.log('[VNPAY CALLBACK] Tìm thấy mã đơn hàng trong vnp_OrderInfo:', orderCode);
         }
       }
 
       if (!orderCode) {
-        console.error('Không thể xác định mã đơn hàng từ callback VNPAY');
+        console.error('[VNPAY CALLBACK] Không thể xác định mã đơn hàng từ callback VNPAY');
         return res.redirect(`${process.env.CLIENT_URL}/payment/result?status=error&message=Không thể xác định mã đơn hàng`);
       }
 
-      // Sử dụng hàm xử lý chung để cập nhật đơn hàng
+      // Xử lý đơn hàng với thông tin giao dịch
       const transactionInfo = {
         vnpayResponse: req.query,
         amount: result.amount,
@@ -292,20 +319,56 @@ exports.vnpayCallback = async (req, res, next) => {
 
       const processResult = await processPaymentCallback(orderCode, 'VNPAY', transactionInfo);
 
-      if (processResult.wasAlreadyCompleted || processResult.success) {
-        // Chuyển hướng về trang kết quả với trạng thái thành công
-        return res.redirect(`${process.env.CLIENT_URL}/payment/result?status=success&orderCode=${orderCode}`);
-      } else {
-        // Chuyển hướng với thông báo lỗi
-        return res.redirect(`${process.env.CLIENT_URL}/payment/result?status=error&message=${encodeURIComponent(processResult.message || 'Lỗi xử lý đơn hàng')}`);
+      // Kiểm tra xem đã gửi thông báo chưa
+      if ((processResult.wasAlreadyCompleted || processResult.success) && !processResult.notified) {
+        try {
+          const order = await Order.findOne({ orderCode });
+          if (order && order.payment.status === 'COMPLETED') {
+            // Gửi thông báo nếu chưa được gửi từ processPaymentCallback
+            const notification = new Notification({
+              type: 'new-order',
+              orderId: order._id,
+              orderCode: order.orderCode,
+              title: `Đơn hàng mới #${order.orderCode} (Đã thanh toán qua VNPAY)`,
+              description: `Đơn hàng từ ${order.shippingAddress.fullName} - ${order.total.toLocaleString()} VND`,
+              status: order.status,
+              forAdmin: true,
+              read: false
+            });
+
+            await notification.save();
+
+            await socketManager.notifyNewOrder({
+              _id: order._id.toString(),
+              orderId: order._id.toString(),
+              orderCode: order.orderCode,
+              total: order.total,
+              status: order.status,
+              type: 'new-order',
+              timestamp: new Date(),
+              customerName: order.shippingAddress.fullName,
+              customerPhone: order.shippingAddress.phone,
+              paymentMethod: 'VNPAY',
+              notificationId: notification._id.toString(),
+              isPaid: true
+            });
+
+            console.log(`[VNPAY CALLBACK] Đã gửi thông báo đơn hàng #${order.orderCode} sau khi thanh toán thành công`);
+          }
+        } catch (notifyError) {
+          console.error('[VNPAY CALLBACK] Lỗi khi gửi thông báo sau thanh toán:', notifyError);
+        }
       }
+
+      // Chuyển hướng về trang kết quả với trạng thái thành công
+      return res.redirect(`${process.env.CLIENT_URL}/payment/result?status=success&orderCode=${orderCode}`);
     } else {
       // Xử lý thất bại
-      console.error('Thanh toán VNPAY thất bại:', result.message);
+      console.error('[VNPAY CALLBACK] Thanh toán VNPAY thất bại:', result.message);
       return res.redirect(`${process.env.CLIENT_URL}/payment/result?status=error&message=${encodeURIComponent(result.message)}`);
     }
   } catch (error) {
-    console.error('Lỗi xử lý callback từ VNPAY:', error);
+    console.error('[VNPAY CALLBACK] Lỗi xử lý callback từ VNPAY:', error);
     return res.redirect(`${process.env.CLIENT_URL}/payment/result?status=error&message=Lỗi xử lý thanh toán`);
   }
 };

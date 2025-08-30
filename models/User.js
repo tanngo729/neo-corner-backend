@@ -1,91 +1,34 @@
-// backend/models/User.js - Model người dùng hệ thống (ADMIN)
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
-const userSchema = new mongoose.Schema({
-  username: {
-    type: String,
-    required: [true, 'Tên đăng nhập không được để trống'],
-    unique: true,
-    trim: true
-  },
-  email: {
-    type: String,
-    required: [true, 'Email không được để trống'],
-    unique: true,
-    trim: true,
-    lowercase: true,
-    match: [/^\S+@\S+\.\S+$/, 'Email không hợp lệ']
-  },
-  password: {
-    type: String,
-    required: [true, 'Mật khẩu không được để trống'],
-    minlength: [6, 'Mật khẩu phải có ít nhất 6 ký tự'],
-    select: false
-  },
-  fullName: {
-    type: String,
-    trim: true
-  },
-  avatar: {
-    url: String,
-    publicId: String
-  },
-  role: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Role',
-    required: true
-  },
-  status: {
-    type: String,
-    enum: ['active', 'inactive', 'banned'],
-    default: 'active'
-  },
-  lastLogin: {
-    type: Date
-  },
-  type: {
-    type: String,
-    enum: ['admin', 'staff'],
-    default: 'staff'
-  }
-}, {
-  timestamps: true
+const UserSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true, trim: true },
+  email: { type: String, required: true, unique: true, trim: true },
+  password: { type: String, required: true, select: false },
+  fullName: { type: String, trim: true },
+  role: { type: mongoose.Schema.Types.ObjectId, ref: 'Role' },
+  status: { type: String, enum: ['active', 'inactive', 'banned'], default: 'active' },
+  type: { type: String, enum: ['admin', 'staff'], default: 'admin' },
+  lastLogin: { type: Date }
+}, { timestamps: true });
+
+UserSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
+  next();
 });
 
-// Mã hóa mật khẩu trước khi lưu
-userSchema.pre('save', async function (next) {
-  // Chỉ mã hóa mật khẩu nếu nó được thay đổi
-  if (!this.isModified('password')) {
-    return next();
-  }
-  try {
-    const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
-    next();
-  } catch (error) {
-    next(error);
-  }
-});
-
-// Phương thức xác thực mật khẩu
-userSchema.methods.matchPassword = async function (enteredPassword) {
-  return await bcrypt.compare(enteredPassword, this.password);
+UserSchema.methods.matchPassword = async function(entered) {
+  return bcrypt.compare(entered, this.password);
 };
 
-// Phương thức tạo JWT token - ĐÃ CẬP NHẬT
-userSchema.methods.generateAuthToken = function () {
-  // Đối với admin, token có thời hạn dài hơn (30 ngày)
-  const expiresIn = this.type === 'admin' ? '30d' : process.env.JWT_ACCESS_EXPIRATION_MINUTES + 'm';
-
-  return jwt.sign(
-    { id: this._id, type: this.type },
-    process.env.JWT_SECRET,
-    { expiresIn }
-  );
+UserSchema.methods.generateAuthToken = function() {
+  return jwt.sign({ id: this._id, type: this.type }, process.env.JWT_SECRET || 'dev_secret', {
+    expiresIn: '30d'
+  });
 };
 
-const User = mongoose.model('User', userSchema);
+module.exports = mongoose.model('User', UserSchema);
 
-module.exports = User;

@@ -21,4 +21,6 @@ router.get('/info', checkoutController.getCheckoutInfo);
 // Xử lý checkout - yêu cầu email đã xác thực 
 router.post('/process', requireVerifiedEmail, checkoutController.processCheckout);
 
+router.post('/apply-coupon', authenticateCustomer, checkoutController.applyCoupon);
+
 module.exports = router;

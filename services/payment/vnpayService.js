@@ -9,7 +9,7 @@ class VnpayService {
     this.tmnCode = config.vnpTmnCode || process.env.VNPAY_TMN_CODE;
     this.hashSecret = config.vnpHashSecret || process.env.VNPAY_HASH_SECRET;
     this.vnpUrl = config.vnpUrl || process.env.VNPAY_URL || 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html';
-    this.returnUrl = process.env.VNPAY_RETURN_URL;
+    this.returnUrl = config.vnpReturnUrl || process.env.VNPAY_RETURN_URL;
     this.isTestMode = config.vnpTestMode !== false;
 
     // Log cấu hình để debug

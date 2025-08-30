@@ -111,6 +111,14 @@ exports.updateOrderStatus = async (req, res, next) => {
       order.payment.paidAt = Date.now();
     }
 
+    // THÊM LOGIC MỚI: Cập nhật trạng thái thanh toán khi đơn hàng COD được giao hàng hoặc hoàn thành
+    if (order.paymentMethod === 'COD' &&
+      (status === 'DELIVERED' || status === 'COMPLETED') &&
+      order.payment.status !== 'COMPLETED') {
+      order.payment.status = 'COMPLETED';
+      order.payment.paidAt = Date.now();
+    }
+
     // Nếu chưa cập nhật tồn kho và đang xử lý đơn hàng
     if (!order.stockUpdated && (status === 'PROCESSING' || status === 'SHIPPING')) {
       for (const item of order.items) {

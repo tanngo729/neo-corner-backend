@@ -341,7 +341,7 @@ exports.getTopCustomers = async (req, res, next) => {
     ]);
 
     // Bổ sung thông tin khách hàng
-    const customerIds = topCustomers.map(item => mongoose.Types.ObjectId(item._id));
+    const customerIds = topCustomers.map(item => item._id);
     const customerDetails = await Customer.find({ _id: { $in: customerIds } })
       .select('fullName email phone')
       .lean();
@@ -423,20 +423,344 @@ exports.getOrderStatusDistribution = async (req, res, next) => {
   }
 };
 
-// Lấy tất cả dữ liệu dashboard một lần
+// Lấy tất cả dữ liệu dashboard một lần - ĐÃ ĐƯỢC SỬA
 exports.getDashboardData = async (req, res, next) => {
   try {
     const { startDate, endDate } = req.query;
 
-    // Gọi tất cả service cần thiết
-    const [stats, salesData, recentOrders, topProducts, topCustomers, statusDistribution] = await Promise.all([
-      this.getStats(req, { json: () => ({}) }, () => ({})).then(r => r.data),
-      this.getSalesChart(req, { json: () => ({}) }, () => ({})).then(r => r.data),
-      this.getRecentOrders(req, { json: () => ({}) }, () => ({})).then(r => r.data),
-      this.getTopProducts(req, { json: () => ({}) }, () => ({})).then(r => r.data),
-      this.getTopCustomers(req, { json: () => ({}) }, () => ({})).then(r => r.data),
-      this.getOrderStatusDistribution(req, { json: () => ({}) }, () => ({})).then(r => r.data)
+    // Định nghĩa điều kiện lọc chung theo ngày
+    const dateFilter = {};
+    if (startDate && endDate) {
+      dateFilter.createdAt = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate)
+      };
+    }
+
+    // Định nghĩa các promises để truy vấn dữ liệu
+
+    // 1. Promise cho thống kê tổng quan
+    const statsPromise = Promise.all([
+      // Lấy thống kê đơn hàng
+      Order.aggregate([
+        { $match: { ...dateFilter } },
+        {
+          $group: {
+            _id: null,
+            totalOrders: { $sum: 1 },
+            totalRevenue: { $sum: '$total' },
+            pendingOrders: {
+              $sum: {
+                $cond: [{ $eq: ['$status', 'PENDING'] }, 1, 0]
+              }
+            },
+            processingOrders: {
+              $sum: {
+                $cond: [{ $eq: ['$status', 'PROCESSING'] }, 1, 0]
+              }
+            },
+            shippingOrders: {
+              $sum: {
+                $cond: [{ $eq: ['$status', 'SHIPPING'] }, 1, 0]
+              }
+            },
+            deliveredOrders: {
+              $sum: {
+                $cond: [{ $eq: ['$status', 'DELIVERED'] }, 1, 0]
+              }
+            },
+            completedOrders: {
+              $sum: {
+                $cond: [{ $eq: ['$status', 'COMPLETED'] }, 1, 0]
+              }
+            },
+            cancelledOrders: {
+              $sum: {
+                $cond: [{ $eq: ['$status', 'CANCELLED'] }, 1, 0]
+              }
+            },
+            refundedOrders: {
+              $sum: {
+                $cond: [{ $eq: ['$status', 'REFUNDED'] }, 1, 0]
+              }
+            }
+          }
+        }
+      ]),
+      // Lấy số lượng khách hàng
+      Customer.countDocuments(),
+      // Lấy số lượng sản phẩm
+      Product.countDocuments(),
+      // Lấy số lượng sản phẩm có stock < 5
+      Product.countDocuments({ stock: { $lt: 5 } })
     ]);
+
+    // 2. Promise cho dữ liệu biểu đồ doanh thu
+    const endDateObj = endDate ? new Date(endDate) : new Date();
+    const startDateObj = startDate ? new Date(startDate) : new Date(endDateObj.getTime() - 30 * 24 * 60 * 60 * 1000);
+    endDateObj.setHours(23, 59, 59, 999);
+    startDateObj.setHours(0, 0, 0, 0);
+
+    const salesDataPromise = Order.aggregate([
+      {
+        $match: {
+          createdAt: {
+            $gte: startDateObj,
+            $lte: endDateObj
+          },
+          status: { $nin: ['CANCELLED', 'REFUNDED'] }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' }
+          },
+          value: { $sum: '$total' },
+          orders: { $sum: 1 }
+        }
+      },
+      {
+        $sort: { _id: 1 }
+      }
+    ]);
+
+    // 3. Promise cho danh sách đơn hàng gần đây
+    const recentOrdersPromise = Order.find()
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .populate('user', 'fullName email phone')
+      .lean();
+
+    // 4. Promise cho danh sách sản phẩm bán chạy
+    const topProductsPromise = Order.aggregate([
+      {
+        $match: {
+          ...dateFilter,
+          status: { $in: ['COMPLETED', 'DELIVERED', 'SHIPPING'] }
+        }
+      },
+      { $unwind: '$items' },
+      {
+        $group: {
+          _id: '$items.product',
+          name: { $first: '$items.name' },
+          sold: { $sum: '$items.quantity' },
+          revenue: {
+            $sum: { $multiply: ['$items.price', '$items.quantity'] }
+          }
+        }
+      },
+      { $sort: { sold: -1 } },
+      { $limit: 5 }
+    ]);
+
+    // 5. Promise cho danh sách khách hàng tiềm năng
+    const topCustomersPromise = Order.aggregate([
+      {
+        $match: {
+          ...dateFilter,
+          status: { $nin: ['CANCELLED', 'REFUNDED'] }
+        }
+      },
+      {
+        $group: {
+          _id: '$user',
+          orders: { $sum: 1 },
+          spent: { $sum: '$total' }
+        }
+      },
+      { $sort: { spent: -1 } },
+      { $limit: 5 }
+    ]);
+
+    // 6. Promise cho phân bố trạng thái đơn hàng
+    const statusDistributionPromise = Order.aggregate([
+      { $match: { ...dateFilter } },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    // Gọi tất cả Promise và xử lý kết quả
+    const [
+      [orderStatsResult, totalCustomers, totalProducts, lowStockProducts],
+      salesDataRaw,
+      recentOrders,
+      topProductsRaw,
+      topCustomersRaw,
+      statusDistributionRaw
+    ] = await Promise.all([
+      statsPromise,
+      salesDataPromise,
+      recentOrdersPromise,
+      topProductsPromise,
+      topCustomersPromise,
+      statusDistributionPromise
+    ]);
+
+    // Xử lý dữ liệu thống kê
+    const orderStats = orderStatsResult[0] || {
+      totalOrders: 0,
+      totalRevenue: 0,
+      pendingOrders: 0,
+      processingOrders: 0,
+      shippingOrders: 0,
+      deliveredOrders: 0,
+      completedOrders: 0,
+      cancelledOrders: 0,
+      refundedOrders: 0
+    };
+
+    // Tính toán doanh thu so với kỳ trước
+    let revenueComparison = null;
+    if (startDate && endDate) {
+      const start = moment(startDate);
+      const end = moment(endDate);
+      const duration = moment.duration(end.diff(start)).asDays();
+      const prevStart = start.clone().subtract(duration, 'days');
+      const prevEnd = start.clone().subtract(1, 'days');
+
+      const prevRevenueData = await Order.aggregate([
+        {
+          $match: {
+            createdAt: {
+              $gte: prevStart.toDate(),
+              $lte: prevEnd.toDate()
+            },
+            status: { $nin: ['CANCELLED', 'REFUNDED'] }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: '$total' }
+          }
+        }
+      ]);
+
+      const prevRevenue = prevRevenueData.length > 0 ? prevRevenueData[0].totalRevenue : 0;
+      const currentRevenue = orderStats.totalRevenue || 0;
+
+      if (prevRevenue > 0) {
+        revenueComparison = {
+          percentChange: ((currentRevenue - prevRevenue) / prevRevenue) * 100,
+          increased: currentRevenue > prevRevenue
+        };
+      }
+    }
+
+    // Hoàn thiện thống kê
+    const stats = {
+      totalOrders: orderStats.totalOrders || 0,
+      totalRevenue: orderStats.totalRevenue || 0,
+      totalCustomers,
+      totalProducts,
+      lowStockProducts,
+      pendingOrders: orderStats.pendingOrders || 0,
+      processingOrders: orderStats.processingOrders || 0,
+      shippingOrders: orderStats.shippingOrders || 0,
+      deliveredOrders: orderStats.deliveredOrders || 0,
+      completedOrders: orderStats.completedOrders || 0,
+      cancelledOrders: orderStats.cancelledOrders || 0,
+      refundedOrders: orderStats.refundedOrders || 0,
+      revenueComparison
+    };
+
+    // Xử lý dữ liệu biểu đồ doanh thu
+    const dateMap = {};
+    let currentDate = new Date(startDateObj);
+    while (currentDate <= endDateObj) {
+      const dateString = moment(currentDate).format('YYYY-MM-DD');
+      dateMap[dateString] = {
+        date: dateString,
+        value: 0,
+        orders: 0
+      };
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+    salesDataRaw.forEach(item => {
+      dateMap[item._id] = {
+        date: item._id,
+        value: item.value,
+        orders: item.orders
+      };
+    });
+    const salesData = Object.values(dateMap);
+
+    // Xử lý danh sách sản phẩm bán chạy
+    const productIds = topProductsRaw.map(item => item._id);
+    let productDetails = [];
+    if (productIds.length > 0) {
+      productDetails = await Product.find({ _id: { $in: productIds } })
+        .select('name slug images')
+        .lean();
+    }
+
+    const productMap = {};
+    productDetails.forEach(product => {
+      productMap[product._id.toString()] = product;
+    });
+
+    const topProducts = topProductsRaw.map(item => {
+      const productId = item._id.toString();
+      const product = productMap[productId] || {};
+      return {
+        id: productId,
+        name: item.name || product.name || 'Sản phẩm không xác định',
+        slug: product.slug,
+        image: product.images && product.images.length > 0 ? product.images[0].url : null,
+        sold: item.sold,
+        revenue: item.revenue
+      };
+    });
+
+    // Xử lý danh sách khách hàng tiềm năng
+    const customerIds = topCustomersRaw.map(item => item._id);
+    let customerDetails = [];
+    if (customerIds.length > 0) {
+      customerDetails = await Customer.find({ _id: { $in: customerIds } })
+        .select('fullName email phone')
+        .lean();
+    }
+
+    const customerMap = {};
+    customerDetails.forEach(customer => {
+      customerMap[customer._id.toString()] = customer;
+    });
+
+    const topCustomers = topCustomersRaw.map(item => {
+      const customerId = item._id.toString();
+      const customer = customerMap[customerId] || {};
+      return {
+        id: customerId,
+        name: customer.fullName || 'Khách hàng không xác định',
+        email: customer.email || 'N/A',
+        phone: customer.phone || 'N/A',
+        orders: item.orders,
+        spent: item.spent
+      };
+    });
+
+    // Xử lý phân bố trạng thái
+    const statusMap = {
+      'PENDING': { color: '#1890ff' },
+      'AWAITING_PAYMENT': { color: '#faad14' },
+      'PROCESSING': { color: '#52c41a' },
+      'SHIPPING': { color: '#722ed1' },
+      'DELIVERED': { color: '#13c2c2' },
+      'COMPLETED': { color: '#52c41a' },
+      'CANCELLED': { color: '#f5222d' },
+      'REFUNDED': { color: '#fa541c' }
+    };
+    const statusDistribution = statusDistributionRaw.map(item => ({
+      status: item._id,
+      value: item.count,
+      color: statusMap[item._id]?.color || '#d9d9d9'
+    }));
 
     // Tổng hợp dữ liệu
     const dashboardData = {

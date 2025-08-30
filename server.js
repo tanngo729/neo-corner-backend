@@ -9,32 +9,46 @@ const mongoSanitize = require('express-mongo-sanitize');
 const path = require('path');
 const http = require('http');
 const socketIO = require('socket.io');
+
+// Load environment variables early: prefer repo root .env, fall back to backend/.env
+const rootEnvPath = path.resolve(__dirname, '../.env');
+const localEnvPath = path.resolve(__dirname, './.env');
+if (require('fs').existsSync(rootEnvPath)) {
+  dotenv.config({ path: rootEnvPath });
+} else if (require('fs').existsSync(localEnvPath)) {
+  dotenv.config({ path: localEnvPath });
+} else {
+  dotenv.config();
+}
+
+// Fallback API_URL when not provided
+if (!process.env.API_URL) {
+  process.env.API_URL = `http://localhost:${process.env.PORT || 5000}`;
+}
+
+// Import modules that can rely on env after it’s loaded
 const { errorConverter, errorHandler } = require('./utils/errorHandler');
 const { adminRouter, clientRouter } = require('./routes');
 const authDebug = require('./middlewares/authDebugMiddleware');
 const { initializeData } = require('./utils/seedData');
 
-// Tải biến môi trường
-dotenv.config({ path: './.env' });
-
-// Đặt biến API_URL nếu chưa được đặt trong .env
-if (!process.env.API_URL) {
-  process.env.API_URL = `http://localhost:${process.env.PORT || 5000}`;
-}
-
 console.log('Môi trường:', process.env.NODE_ENV);
 console.log('API URL:', process.env.API_URL);
 console.log('CLIENT URL:', process.env.CLIENT_URL);
 
-// Kết nối MongoDB
-mongoose.connect(process.env.MONGODB_URI)
-  .then(async () => {
-    console.log('MongoDB đã kết nối thành công...');
-    if (process.env.NODE_ENV === 'development') {
-      await initializeData();
-    }
-  })
-  .catch(err => console.log('Lỗi kết nối MongoDB:', err));
+// Kết nối MongoDB (nếu đã cấu hình MONGODB_URI)
+if (!process.env.MONGODB_URI || process.env.MONGODB_URI.trim() === '') {
+  console.error('MONGODB_URI is not set. Skipping DB connection.');
+} else {
+  mongoose.connect(process.env.MONGODB_URI)
+    .then(async () => {
+      console.log('MongoDB đã kết nối thành công...');
+      if (process.env.NODE_ENV === 'development') {
+        await initializeData();
+      }
+    })
+    .catch(err => console.log('Lỗi kết nối MongoDB:', err));
+}
 
 // Khởi tạo ứng dụng Express
 const app = express();

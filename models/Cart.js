@@ -1,59 +1,34 @@
 const mongoose = require('mongoose');
 
-const cartItemSchema = new mongoose.Schema({
-  product: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Product',
-    required: true
-  },
-  quantity: {
-    type: Number,
-    required: true,
-    min: [1, 'Số lượng không thể nhỏ hơn 1'],
-    default: 1
-  },
-  price: {
-    type: Number,
-    required: true
-  },
-  name: String,
-  image: String
+const CartItemSchema = new mongoose.Schema({
+  product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+  name: { type: String },
+  image: { type: String },
+  quantity: { type: Number, default: 1 },
+  price: { type: Number, default: 0 }
 }, { _id: true });
 
-const cartSchema = new mongoose.Schema({
-  user: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
-  },
-  items: [cartItemSchema],
-  couponCode: {
-    type: String,
-    default: null
-  },
-  couponDiscount: {
-    type: Number,
-    default: 0
-  }
-}, {
-  timestamps: true,
-  toJSON: { virtuals: true },
-  toObject: { virtuals: true }
+const CartSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
+  items: { type: [CartItemSchema], default: [] },
+  couponCode: { type: String, default: null },
+  couponDiscount: { type: Number, default: 0 }
+}, { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } });
+
+CartSchema.virtual('subtotal').get(function () {
+  if (!this.items || this.items.length === 0) return 0;
+  return this.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
 });
 
-// Tính tổng số lượng sản phẩm trong giỏ hàng
-cartSchema.virtual('totalItems').get(function () {
-  return this.items.reduce((total, item) => total + item.quantity, 0);
+CartSchema.virtual('totalItems').get(function () {
+  if (!this.items || this.items.length === 0) return 0;
+  return this.items.reduce((sum, item) => sum + item.quantity, 0);
 });
 
-// Tính tổng tiền trước khi áp dụng giảm giá
-cartSchema.virtual('subtotal').get(function () {
-  return this.items.reduce((total, item) => total + (item.price * item.quantity), 0);
+CartSchema.virtual('total').get(function () {
+  const subtotal = this.subtotal || 0;
+  const discount = this.couponDiscount || 0;
+  return Math.max(0, subtotal - discount);
 });
 
-// Tính tổng tiền sau khi áp dụng giảm giá
-cartSchema.virtual('total').get(function () {
-  return Math.max(0, this.subtotal - this.couponDiscount);
-});
-
-module.exports = mongoose.model('Cart', cartSchema);
+module.exports = mongoose.model('Cart', CartSchema);

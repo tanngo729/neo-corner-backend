@@ -2,6 +2,7 @@
 const Order = require('../../models/Order');
 const Cart = require('../../models/Cart');
 const Product = require('../../models/Product');
+const Promotion = require('../../models/Promotion');
 const PaymentMethod = require('../../models/PaymentMethod');
 const ShippingMethod = require('../../models/ShippingMethod');
 const { ApiError } = require('../../utils/errorHandler');
@@ -219,53 +220,50 @@ exports.processCheckout = async (req, res, next) => {
     await session.commitTransaction();
     session.endSession();
 
-    // ------------------- THÊM MỚI: Code gửi thông báo đơn hàng (CẬP NHẬT) -------------------
+    // ------------------- CẬP NHẬT: Code gửi thông báo đơn hàng -------------------
     try {
-      // TẠO DỮ LIỆU THÔNG BÁO CHUẨN HÓA
-      const notificationData = {
-        _id: order._id.toString(),
-        orderId: order._id.toString(),
-        orderCode: order.orderCode,
-        total: order.total,
-        status: order.status,
-        type: 'new-order',
-        timestamp: new Date(),
-        // Thêm các thông tin chi tiết khác
-        customerName: shippingAddress.fullName,
-        customerPhone: shippingAddress.phone,
-        paymentMethod: paymentMethod
-      };
+      // CHỈ GỬI THÔNG BÁO CHO PHƯƠNG THỨC THANH TOÁN TRỰC TIẾP (COD, BANK_TRANSFER)
+      // Thanh toán MOMO/VNPAY sẽ được thông báo sau khi thanh toán thành công qua callback
+      if (paymentMethod === 'COD' || paymentMethod === 'BANK_TRANSFER') {
+        // TẠO DỮ LIỆU THÔNG BÁO CHUẨN HÓA
+        const notificationData = {
+          _id: order._id.toString(),
+          orderId: order._id.toString(),
+          orderCode: order.orderCode,
+          total: order.total,
+          status: order.status,
+          type: 'new-order',
+          timestamp: new Date(),
+          // Thêm các thông tin chi tiết khác
+          customerName: shippingAddress.fullName,
+          customerPhone: shippingAddress.phone,
+          paymentMethod: paymentMethod
+        };
 
-      console.log(`[THÔNG BÁO ĐƠN HÀNG] Đơn hàng mới #${order.orderCode} - Đang gửi thông báo qua socket`);
+        console.log(`[THÔNG BÁO ĐƠN HÀNG] Đơn hàng mới #${order.orderCode} - Đang gửi thông báo qua socket`);
 
-      // LƯU THÔNG BÁO VÀO DATABASE
-      const notification = new Notification({
-        type: 'new-order',
-        orderId: order._id,
-        orderCode: order.orderCode,
-        title: `Đơn hàng mới #${order.orderCode}`,
-        description: `Đơn hàng từ ${shippingAddress.fullName} - ${order.total.toLocaleString()} VND`,
-        status: order.status,
-        forAdmin: true,
-        read: false
-      });
-      await notification.save();
-      console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã lưu thông báo vào database: ${notification._id}`);
+        // LƯU THÔNG BÁO VÀO DATABASE
+        const notification = new Notification({
+          type: 'new-order',
+          orderId: order._id,
+          orderCode: order.orderCode,
+          title: `Đơn hàng mới #${order.orderCode}`,
+          description: `Đơn hàng từ ${shippingAddress.fullName} - ${order.total.toLocaleString()} VND`,
+          status: order.status,
+          forAdmin: true,
+          read: false
+        });
+        await notification.save();
+        console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã lưu thông báo vào database: ${notification._id}`);
 
-      // CHỈ SỬ DỤNG MỘT PHƯƠNG THỨC GỬI THÔNG BÁO DUY NHẤT
-      await socketManager.notifyNewOrder({
-        ...notificationData,
-        notificationId: notification._id.toString()
-      });
-
-      // KHÔNG SỬ DỤNG EMIT TRỰC TIẾP NỮA ĐỂ TRÁNH THÔNG BÁO KÉP
-      // if (socketManager.getIO()) {
-      //   socketManager.getIO().emit('new-order', {
-      //     ...notificationData,
-      //     urgent: true
-      //   });
-      //   console.log(`[THÔNG BÁO ĐƠN HÀNG] Đã gửi broadcast thông báo khẩn cấp cho đơn hàng #${order.orderCode}`);
-      // }
+        // CHỈ SỬ DỤNG MỘT PHƯƠNG THỨC GỬI THÔNG BÁO DUY NHẤT
+        await socketManager.notifyNewOrder({
+          ...notificationData,
+          notificationId: notification._id.toString()
+        });
+      } else {
+        console.log(`[THÔNG BÁO ĐƠN HÀNG] Đơn hàng #${order.orderCode} sử dụng thanh toán ${paymentMethod}, sẽ thông báo sau khi thanh toán thành công`);
+      }
     } catch (notifyError) {
       console.error('Lỗi khi gửi thông báo đơn hàng:', notifyError);
       // Vẫn tiếp tục xử lý, không ảnh hưởng đến việc tạo đơn hàng
@@ -340,5 +338,194 @@ exports.getCheckoutInfo = async (req, res, next) => {
     return ApiResponse.success(res, 200, checkoutInfo, 'Lấy thông tin checkout thành công');
   } catch (error) {
     next(error);
+  }
+};
+
+exports.applyCoupon = async (req, res, next) => {
+  try {
+    const { code } = req.body;
+
+    // Thêm log để debug
+    console.log('[COUPON DEBUG] Request body:', req.body);
+    console.log('[COUPON DEBUG] User:', req.user ? req.user.id : 'Not authenticated');
+
+    // Kiểm tra xác thực
+    if (!req.user || !req.user.id) {
+      throw new ApiError(401, 'Vui lòng đăng nhập để sử dụng mã giảm giá');
+    }
+
+    const customerId = req.user.id;
+
+    if (!code) {
+      throw new ApiError(400, 'Mã khuyến mãi không được để trống');
+    }
+
+    // Tìm khuyến mãi theo mã
+    const promotion = await Promotion.findByCode(code);
+    console.log('[COUPON DEBUG] Mã khuyến mãi tìm thấy:', promotion ? promotion.code : 'Not found');
+
+    if (!promotion) {
+      throw new ApiError(404, 'Mã khuyến mãi không tồn tại');
+    }
+
+    // Kiểm tra khuyến mãi có hợp lệ không
+    if (!promotion.isValidPromotion()) {
+      if (promotion.expiry && promotion.expiry < new Date()) {
+        throw new ApiError(400, 'Mã khuyến mãi đã hết hạn');
+      }
+      if (promotion.startDate && promotion.startDate > new Date()) {
+        throw new ApiError(400, 'Mã khuyến mãi chưa bắt đầu');
+      }
+      if (!promotion.isActive) {
+        throw new ApiError(400, 'Mã khuyến mãi không khả dụng');
+      }
+      if (promotion.maxUses > 0 && promotion.usedCount >= promotion.maxUses) {
+        throw new ApiError(400, 'Mã khuyến mãi đã đạt giới hạn sử dụng');
+      }
+    }
+
+    // Kiểm tra xem khách hàng đã sử dụng mã này chưa (nếu cần)
+    if (promotion.usageType === 'once') {
+      const usedByCustomer = await Order.findOne({
+        user: customerId,
+        'coupon.code': promotion.code,
+        status: { $nin: ['CANCELLED', 'REFUNDED'] }
+      });
+
+      if (usedByCustomer) {
+        throw new ApiError(400, 'Bạn đã sử dụng mã này trước đó');
+      }
+    }
+
+    // Kiểm tra điều kiện người dùng
+    if (promotion.userType === 'new') {
+      const customerOrders = await Order.countDocuments({
+        user: customerId,
+        status: { $nin: ['CANCELLED', 'REFUNDED'] }
+      });
+
+      if (customerOrders > 0) {
+        throw new ApiError(400, 'Mã khuyến mãi chỉ áp dụng cho khách hàng mới');
+      }
+    }
+
+    // Lấy giỏ hàng hiện tại để kiểm tra giá trị và điều kiện áp dụng
+    const cart = await Cart.findOne({ user: customerId })
+      .populate({
+        path: 'items.product',
+        select: 'name price stock categories status'
+      });
+
+    if (!cart || !cart.items || cart.items.length === 0) {
+      throw new ApiError(400, 'Giỏ hàng trống');
+    }
+
+    console.log('[COUPON DEBUG] Giỏ hàng tìm thấy:', cart ? `ID: ${cart._id}, Items: ${cart.items.length}` : 'No cart found');
+
+    // Tính tổng giá trị đơn hàng
+    const subtotal = cart.items.reduce((sum, item) =>
+      sum + (item.price * item.quantity), 0);
+
+    // Kiểm tra giá trị tối thiểu
+    if (promotion.minPurchase > 0 && subtotal < promotion.minPurchase) {
+      throw new ApiError(
+        400,
+        `Giá trị đơn hàng phải từ ${promotion.minPurchase.toLocaleString()}đ trở lên`
+      );
+    }
+
+    // Kiểm tra áp dụng cho sản phẩm/danh mục cụ thể
+    if (promotion.appliesTo !== 'all') {
+      let validItems = false;
+
+      if (promotion.appliesTo === 'category' && promotion.categoryIds.length > 0) {
+        // Kiểm tra xem giỏ hàng có sản phẩm thuộc danh mục áp dụng không
+        validItems = cart.items.some(item =>
+          item.product &&
+          item.product.categories &&
+          item.product.categories.some(cat =>
+            promotion.categoryIds.includes(cat.toString())
+          )
+        );
+      } else if (promotion.appliesTo === 'product' && promotion.productIds.length > 0) {
+        // Kiểm tra xem giỏ hàng có sản phẩm thuộc danh sách sản phẩm áp dụng không
+        validItems = cart.items.some(item =>
+          item.product &&
+          promotion.productIds.includes(item.product._id.toString())
+        );
+      }
+
+      if (!validItems) {
+        throw new ApiError(400, 'Mã khuyến mãi không áp dụng cho sản phẩm trong giỏ hàng');
+      }
+    }
+
+    // Tính toán giảm giá
+    let discountAmount = 0;
+    if (promotion.discountType === 'percent') {
+      discountAmount = subtotal * (promotion.discountValue / 100);
+    } else { // fixed discount
+      discountAmount = Math.min(promotion.discountValue, subtotal); // Không được giảm quá giá trị đơn hàng
+    }
+
+    // Lưu thông tin mã giảm giá
+    const couponInfo = {
+      code: promotion.code,
+      discountType: promotion.discountType,
+      discountValue: promotion.discountValue,
+      discountAmount: discountAmount,
+      promotionId: promotion._id
+    };
+
+    console.log('[COUPON DEBUG] Thông tin áp dụng mã giảm giá:', couponInfo);
+
+    // Trả về thông tin giảm giá cho client
+    return ApiResponse.success(res, 200, {
+      coupon: couponInfo,
+      originalAmount: subtotal,
+      discountAmount: discountAmount,
+      finalAmount: subtotal - discountAmount
+    }, 'Áp dụng mã khuyến mãi thành công');
+  } catch (error) {
+    console.error('[COUPON ERROR]', error);
+    next(error);
+  }
+};
+
+// Thêm phương thức xác thực mã trong quá trình tạo đơn hàng
+exports.validateCouponForCheckout = async (code, userId, subtotal, items) => {
+  if (!code) return null;
+
+  try {
+    // Tìm khuyến mãi theo mã
+    const promotion = await Promotion.findByCode(code);
+
+    if (!promotion || !promotion.isValidPromotion()) {
+      return null;
+    }
+
+    // Kiểm tra giá trị tối thiểu
+    if (promotion.minPurchase > 0 && subtotal < promotion.minPurchase) {
+      return null;
+    }
+
+    // Tính toán giảm giá
+    let discountAmount = 0;
+    if (promotion.discountType === 'percent') {
+      discountAmount = subtotal * (promotion.discountValue / 100);
+    } else {
+      discountAmount = Math.min(promotion.discountValue, subtotal);
+    }
+
+    return {
+      code: promotion.code,
+      discountType: promotion.discountType,
+      discountValue: promotion.discountValue,
+      discountAmount: discountAmount,
+      promotionId: promotion._id
+    };
+  } catch (error) {
+    console.error('Lỗi khi xác thực mã khuyến mãi:', error);
+    return null;
   }
 };

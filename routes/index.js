@@ -14,6 +14,8 @@ const adminCustomerRoutes = require('./admin/customerRoutes');
 const adminPaymentSettingsRoutes = require('./admin/paymentSettingsRoutes');
 const adminOrderRoutes = require('./admin/orderRoutes');
 const adminNotificationRoutes = require('./admin/notificationRoutes');
+const adminBannerRoutes = require('./admin/bannerRoutes');
+const adminPromotionRoutes = require('./admin/promotionRoutes'); // Thêm route promotion
 
 // Import client routes
 const clientProductRoutes = require('./client/productRoutes');
@@ -25,6 +27,8 @@ const clientCheckoutRoutes = require('./client/checkoutRoutes');
 const clientPaymentRoutes = require('./client/paymentRoutes');
 const clientCallbackRoutes = require('./client/callbackRoutes');
 const clientNotificationRoutes = require('./client/notificationRoutes');
+const clientBannerRoutes = require('./client/bannerRoutes');
+const clientPromotionRoutes = require('./client/promotionRoutes');
 
 // Nhóm routes admin
 const adminRouter = express.Router();
@@ -40,6 +44,8 @@ adminRouter.use('/customers', adminCustomerRoutes);
 adminRouter.use('/payment-settings', adminPaymentSettingsRoutes);
 adminRouter.use('/orders', adminOrderRoutes);
 adminRouter.use('/notifications', adminNotificationRoutes);
+adminRouter.use('/banners', adminBannerRoutes);
+adminRouter.use('/promotions', adminPromotionRoutes);
 
 // Nhóm routes client
 const clientRouter = express.Router();
@@ -52,6 +58,8 @@ clientRouter.use('/checkout', clientCheckoutRoutes);
 clientRouter.use('/payment', clientPaymentRoutes);
 clientRouter.use('/callback', clientCallbackRoutes);
 clientRouter.use('/notifications', clientNotificationRoutes);
+clientRouter.use('/banners', clientBannerRoutes);
+clientRouter.use('/promotions', clientPromotionRoutes);
 
 module.exports = {
   adminRouter,

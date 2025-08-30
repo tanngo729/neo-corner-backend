@@ -4,19 +4,22 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// Cấu hình Cloudinary - sử dụng giá trị hardcoded trực tiếp không thông qua biến
+// Configure Cloudinary via environment variables (recommended)
 cloudinary.config({
-  cloud_name: "dcy4ne8og",
-  api_key: "774113917717964",
-  api_secret: "YMbiMLkhMTUsMMWpjEEVVInxc18"
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || '',
+  api_key: process.env.CLOUDINARY_API_KEY || '',
+  api_secret: process.env.CLOUDINARY_API_SECRET || ''
 });
 
-// Kiểm tra xem cấu hình đã được áp dụng chưa
-console.log("Cloudinary config applied:", {
-  cloud_name: cloudinary.config().cloud_name,
-  api_key: cloudinary.config().api_key ? "exists" : "missing",
-  api_secret: cloudinary.config().api_secret ? "exists" : "missing"
-});
+// Basic config presence log (avoid printing secrets)
+try {
+  const cfg = cloudinary.config();
+  console.log('Cloudinary config:', {
+    cloud_name: cfg.cloud_name || 'missing',
+    api_key: cfg.api_key ? 'exists' : 'missing',
+    api_secret: cfg.api_secret ? 'exists' : 'missing'
+  });
+} catch (_) {}
 
 // Cấu hình disk storage cho multer
 const diskStorage = multer.diskStorage({

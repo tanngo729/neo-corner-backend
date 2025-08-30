@@ -30,7 +30,7 @@ const errorConverter = (err, req, res, next) => {
 
   // Nếu không phải ApiError, chuyển đổi thành ApiError
   if (!(error instanceof ApiError)) {
-    const statusCode = error.statusCode || error instanceof SyntaxError ? 400 : 500;
+    const statusCode = error.statusCode || (error instanceof SyntaxError ? 400 : 500);
     const message = error.message || 'Lỗi hệ thống';
     error = new ApiError(statusCode, message, false, err.stack);
   }

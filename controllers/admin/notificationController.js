@@ -44,10 +44,14 @@ exports.markAsRead = async (req, res, next) => {
     }
 
     // Cập nhật trong database
-    await Notification.updateMany(
-      { _id: { $in: ids }, forAdmin: true },
-      { $set: { read: true } }
-    );
+        const { Types } = require('mongoose');
+    const validIds = ids.filter(id => Types.ObjectId.isValid(id));
+    if (validIds.length > 0) {
+      await Notification.updateMany(
+        { _id: { $in: validIds }, forAdmin: true },
+        { $set: { read: true } }
+      );
+    }
 
     // Đồng bộ trạng thái với các admin khác
     ids.forEach(notificationId => {
@@ -108,6 +112,18 @@ exports.deleteNotification = async (req, res, next) => {
   try {
     const notificationId = req.params.id;
     const adminId = req.user.id;
+
+    const { Types } = require('mongoose');
+    if (!Types.ObjectId.isValid(notificationId)) {
+      if (socketManager.getIO()) {
+        socketManager.getIO().to('admin-channel').emit('admin-notification-deleted', {
+          id: notificationId,
+          deletedBy: adminId,
+          timestamp: new Date().toISOString()
+        });
+      }
+      return ApiResponse.success(res, 200, null, 'Xóa thông báo thành công');
+    }
 
     const notification = await Notification.findOne({
       _id: notificationId,
